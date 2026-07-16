@@ -2,9 +2,9 @@
 #include <apclient.hpp>
 #include <cstdint>
 #include <fstream>
+#include <list>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 
 using json = nlohmann::json;
@@ -16,7 +16,7 @@ struct ArchipelagoConnectionInfo {
     bool wantsDeathlink = false;
 };
 
-enum class LocationCheckResult { NotReady, UnknownLocation, Sent };
+enum class LocationCheckResult { NotReady, UnknownLocation, AlreadyChecked, Sent };
 
 enum class ItemLookupResult { NotReady, UnknownItem, KnownItem };
 
@@ -67,7 +67,6 @@ class Archipelago {
    private:
     void AbortPassword();
     void ConnectSlot();
-    LocationCheckResult GetLocationCheckResult(const std::string& locationId) const;
     void LoadLocalProgress();
     void ProcessReceivedItems();
     void SaveConnectionInfo() const;
@@ -83,8 +82,6 @@ class Archipelago {
     std::string password_;
     std::string localSavePrefix_;
     int itemsHandling_ = 0b111;  // Send all received items, including starting inventory
-    std::set<int64_t> missingLocations_;
-    std::set<int64_t> checkedLocations_;
 
     mutable std::string lastError_;
     mutable int64_t lastReceivedItemIndex_ = -1;

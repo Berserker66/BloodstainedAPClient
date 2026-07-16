@@ -28,7 +28,6 @@ std::set<std::string> HookManager::processedWidgets;
 void (*HookManager::originalProcessEvent)(SDK::UObject*, SDK::UFunction*, void*) = nullptr;
 void (*HookManager::originalProcessLocalScriptFunction)(SDK::UObject*, SDK::UFunction*, void*) = nullptr;
 bool HookManager::playerDetected = false;
-std::unordered_set<std::string> sentLocationChecks;
 
 struct ShardAppearance {
     SDK::EShardType type;
@@ -393,7 +392,6 @@ bool HookManager::PostInit() {
     NotifyOnClassFunction("Chr_P0000_C", "Kill", [](void* obj) {
         Logger::Log("Player died");
         GameManager::Instance().PlayerDied();
-        sentLocationChecks.clear();
         Logger::Log("Pending death link", Archipelago::ConnectedInstance()->IsPendingDeathlink());
         // pending death is true
         if (!Archipelago::ConnectedInstance()->IsPendingDeathlink()) {
@@ -412,7 +410,6 @@ bool HookManager::PostInit() {
         if (!GameManager::Instance().IsPlayerDead()) {
             if (Archipelago::Instance().IsConnected()) APBridge::Instance().EnqueueDisconnect();
             Gui::Instance().ResetAutoConnect();
-            sentLocationChecks.clear();
         }
         Logger::Log("Returned to title");
     });
@@ -431,7 +428,6 @@ bool HookManager::PostInit() {
     // When player saves
     NotifyOnClassFunction("PBGameInstanceBP_C", "OnSaveStoryDataCompletedDelegates_Event_0", [](void* obj) {
         Logger::Log("Player saved game");
-        sentLocationChecks.clear();
     });
 
     // When the shard that comes out of the enemy appears
@@ -472,7 +468,7 @@ bool HookManager::PostInit() {
         if (checkResult == LocationCheckResult::UnknownLocation) {
             Logger::Log("[Shard] Server supports shard items but this shard has no location; suppressing actor:",
                         shardName);
-        } else {
+        } else if (checkResult == LocationCheckResult::Sent) {
             instance().GivePlayerItem(shardName, false, 0);
             Logger::Log("[Shard] Sent location check:", shardName);
         }
@@ -486,13 +482,13 @@ bool HookManager::PostInit() {
         auto* popup = static_cast<SDK::UItemGetPopup_C*>(obj);
         std::string popupText = popup->MLTF_SIZE_23_ItemName->text.ToString();
 
+        if (!popupText.starts_with("AP_")) return;
 
-		if (!popupText.starts_with("AP_")) return;
-        if (sentLocationChecks.count(popupText)) return;
-
-        sentLocationChecks.insert(popupText);
-        Archipelago::ConnectedInstance()->SendLocationChecks(popupText);
-        Logger::Log("[ItemGetPopup] Sending location check:", popupText);
+        auto* archipelago = Archipelago::ConnectedInstance();
+        if (!archipelago) return;
+        if (archipelago->SendLocationChecks(popupText) == LocationCheckResult::Sent) {
+            Logger::Log("[ItemGetPopup] Sent location check:", popupText);
+        }
     });
 
     Logger::Log("HookManager post initialized successfully");

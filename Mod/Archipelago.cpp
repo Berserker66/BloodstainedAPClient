@@ -3,13 +3,11 @@
 
 #include <Basic.hpp>
 #include <Engine_classes.hpp>
-#include <PB_Chr_Root_classes.hpp>
 #include <ProjectBlood_classes.hpp>
 #include <ProjectBlood_structs.hpp>
 #include <cstdint>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <vector>
 
 #include "GameManager.h"
 #include "HookManager.h"
@@ -79,33 +77,6 @@ void Archipelago::ConnectSlot() {
     }
 }
 
-LocationCheckResult Archipelago::GetLocationCheckResult(const std::string& locationId) const {
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return LocationCheckResult::NotReady;
-
-    const auto missingLocations = ap->get_missing_locations();
-    const auto checkedLocations = ap->get_checked_locations();
-    auto locationExistsInWorld = [&missingLocations, &checkedLocations](int64_t locationId) {
-        return missingLocations.contains(locationId) || checkedLocations.contains(locationId);
-    };
-
-    if (!locationId.starts_with("AP_")) return LocationCheckResult::UnknownLocation;
-    std::string locationWithoutPrefix = locationId.substr(3);
-
-    int64_t apLocationId = ap->get_location_id(locationWithoutPrefix);
-    if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
-        return LocationCheckResult::Sent;
-    }
-
-    for (int i = 0; i <= 3; i++) {
-        std::string fullLocation = locationWithoutPrefix + "." + std::to_string(i);
-        apLocationId = ap->get_location_id(fullLocation);
-        if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
-            return LocationCheckResult::Sent;
-        }
-    }
-    return LocationCheckResult::UnknownLocation;
-}
-
 ItemLookupResult Archipelago::GetItemLookupResult(const std::string& itemName) const {
     if (!ap || !IsConnected() || !ap->is_data_package_valid()) return ItemLookupResult::NotReady;
     return ap->get_item_id(itemName) == APClient::INVALID_NAME_ID ? ItemLookupResult::UnknownItem
@@ -113,10 +84,10 @@ ItemLookupResult Archipelago::GetItemLookupResult(const std::string& itemName) c
 }
 
 LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationId) {
-    LocationCheckResult checkResult = GetLocationCheckResult(locationId);
-    if (checkResult != LocationCheckResult::Sent) return checkResult;
+    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return LocationCheckResult::NotReady;
+    if (!locationId.starts_with("AP_")) return LocationCheckResult::UnknownLocation;
 
-    std::vector<int64_t> locations;
+    std::list<int64_t> locations;
     std::string locationWithoutPrefix = locationId.substr(3);
     const auto missingLocations = ap->get_missing_locations();
     const auto checkedLocations = ap->get_checked_locations();
@@ -124,27 +95,27 @@ LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationI
         return missingLocations.contains(locationId) || checkedLocations.contains(locationId);
     };
 
+    bool locationExists = false;
     int64_t apLocationId = ap->get_location_id(locationWithoutPrefix);
     if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
-        locations.push_back(apLocationId);
-        Logger::Log("[AP] Single item: ", locationWithoutPrefix, " (ID: ", apLocationId, ")");
+        locationExists = true;
+        if (missingLocations.contains(apLocationId)) locations.push_back(apLocationId);
     } else {
         for (int i = 0; i <= 3; i++) {
             std::string fullLocation = locationWithoutPrefix + "." + std::to_string(i);
             apLocationId = ap->get_location_id(fullLocation);
             if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
-                locations.push_back(apLocationId);
-                Logger::Log("[AP] Multi-item chest: ", fullLocation, " (ID: ", locationId, ")");
+                locationExists = true;
+                if (missingLocations.contains(apLocationId)) locations.push_back(apLocationId);
             }
         }
     }
 
-    // Send LocationScout and LocationCheck for all collected locations
-    for (int64_t locationId : locations) {
-        ap->LocationScouts({locationId}, 0);
-        ap->LocationChecks({locationId});
-        Logger::Log("[AP] Sent scout & check for location: ", locationId);
-    }
+    if (!locationExists) return LocationCheckResult::UnknownLocation;
+    if (locations.empty()) return LocationCheckResult::AlreadyChecked;
+
+    ap->LocationChecks(locations);
+    Logger::Log("[AP] Sent ", locations.size(), " location checks for ", locationWithoutPrefix);
     return LocationCheckResult::Sent;
 }
 
@@ -256,19 +227,6 @@ void Archipelago::ProcessReceivedItems() {
         Logger::Log("[AP] Item - player:", item.player, " location:", item.location, " item:", item.item,
                     " index:", item.index, " local index:", lastReceivedItemIndex_);
         std::string itemId = ap->get_item_name(item.item, ap->get_game());
-
-        auto player = static_cast<SDK::APB_Chr_Root_C*>(GameManager::Instance().Player());
-        SDK::FPBItemCatalogData itemData{};
-        std::wstring wideName(itemId.begin(), itemId.end());
-        auto itemName = SDK::UKismetStringLibrary::Conv_StringToName(wideName.c_str());
-        player->CharacterInventory->GetItemDataById(itemName, &itemData);
-
-        std::string displayName = itemData.Name.ToString();
-        if (displayName.empty()) displayName = itemName.ToString();
-        std::string receivedItemsNotification =
-            "Item: " + displayName + ", From: " + ap->get_player_alias(item.player);
-
-        GameManager::Instance().SendInGameNotification(receivedItemsNotification, 1023);
         GivePlayerItem(itemId, false);
 
         int64_t itemIndex = item.index;
@@ -411,19 +369,10 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
 
     ap->set_print_handler([this](const std::string& msg) { Logger::Log("[AP] Raw print: ", msg); });
 
-    ap->set_location_info_handler([this](const std::list<APClient::NetworkItem>& items) {
-        for (const auto& item : items) {
-            if (item.player == ap->get_player_number()) {
-                Logger::Log("[AP] Item - player:", item.player, " location:", item.location, " item:", item.item,
-                            " index:", item.index, "; awaiting ReceivedItems delivery");
-            } else {
-                std::string otherPlayer = ap->get_player_alias(item.player);
-                std::string itemName = ap->get_item_name(item.item, ap->get_player_game(item.player));
-                std::string otherPlayerItemNotification = "Sent: " + itemName + ", To: " + otherPlayer;
-                GameManager::Instance().SendInGameNotification(otherPlayerItemNotification, 1023);
-                Logger::Log("[AP] Item belongs to other player, skipping");
-            }
-        }
+    ap->set_print_json_handler([](const APClient::PrintJSONArgs& args) {
+        if (args.type != "ItemSend" || !ap) return;
+        std::string notification = ap->render_json(args.data);
+        if (!notification.empty()) GameManager::Instance().SendInGameNotification(notification, 1023);
     });
 
     ap->set_items_received_handler([this](const std::list<APClient::NetworkItem>& items) {
@@ -477,20 +426,8 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
 
         ProcessReceivedItems();
 
-        // Store missing locations
-        if (slotData.contains("missing_locations")) {
-            for (const auto& loc : slotData["missing_locations"]) {
-                missingLocations_.insert(loc.get<int64_t>());
-            }
-        }
-        // Store checked locations
-        if (slotData.contains("checked_locations")) {
-            for (const auto& loc : slotData["checked_locations"]) {
-                checkedLocations_.insert(loc.get<int64_t>());
-            }
-        }
-        Logger::Log("[AP] Loaded ", missingLocations_.size(), " missing and ", checkedLocations_.size(),
-                    " checked locations");
+        Logger::Log("[AP] Loaded ", ap->get_missing_locations().size(), " missing and ",
+                    ap->get_checked_locations().size(), " checked locations");
     });
 
     // Handlers for disconnection
