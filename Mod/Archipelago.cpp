@@ -5,9 +5,11 @@
 #include <Engine_classes.hpp>
 #include <ProjectBlood_classes.hpp>
 #include <ProjectBlood_structs.hpp>
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <set>
 
 #include "GameManager.h"
 #include "HookManager.h"
@@ -28,13 +30,18 @@ const int MAX_SEED_LENGTH = 32;
 
 const std::string ITEM_INDEX_SAVE_VALUE = "ItemIndex";
 const std::string CONNECTION_SAVE_PREFIX = "AP_LastConnection_";
+const std::string CLEARED_LOCATION_SAVE_PREFIX = "AP_ClearedLocation_";
 const int32_t CONNECTION_SAVE_VERSION = 1;
 const size_t MAX_CONNECTION_FIELD_LENGTH = 1024;
+const int32_t MAX_CLEARED_LOCATIONS = 4096;
 
 #define UUID_FILE "uuid"
 #define CERT_STORE "cacert.pem"
 
 using json = nlohmann::json;
+
+static std::optional<int32_t> LoadSavedValue(const std::string& saveValueName);
+static std::optional<std::string> LoadSavedString(const std::string& saveValueName);
 
 Archipelago& Archipelago::Instance() {
     static Archipelago instance;
@@ -83,40 +90,106 @@ ItemLookupResult Archipelago::GetItemLookupResult(const std::string& itemName) c
                                                                  : ItemLookupResult::KnownItem;
 }
 
-LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationId) {
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return LocationCheckResult::NotReady;
-    if (!locationId.starts_with("AP_")) return LocationCheckResult::UnknownLocation;
+struct LocationResolution {
+    bool exists = false;
+    std::set<int64_t> missing;
+};
 
-    std::list<int64_t> locations;
+static LocationResolution ResolveLocation(const std::string& locationId, const std::set<int64_t>& missingLocations,
+                                          const std::set<int64_t>& checkedLocations) {
+    LocationResolution resolution;
     std::string locationWithoutPrefix = locationId.substr(3);
-    const auto missingLocations = ap->get_missing_locations();
-    const auto checkedLocations = ap->get_checked_locations();
     auto locationExistsInWorld = [&missingLocations, &checkedLocations](int64_t locationId) {
         return missingLocations.contains(locationId) || checkedLocations.contains(locationId);
     };
 
-    bool locationExists = false;
     int64_t apLocationId = ap->get_location_id(locationWithoutPrefix);
     if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
-        locationExists = true;
-        if (missingLocations.contains(apLocationId)) locations.push_back(apLocationId);
+        resolution.exists = true;
+        if (missingLocations.contains(apLocationId)) resolution.missing.insert(apLocationId);
     } else {
         for (int i = 0; i <= 3; i++) {
             std::string fullLocation = locationWithoutPrefix + "." + std::to_string(i);
             apLocationId = ap->get_location_id(fullLocation);
             if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
-                locationExists = true;
-                if (missingLocations.contains(apLocationId)) locations.push_back(apLocationId);
+                resolution.exists = true;
+                if (missingLocations.contains(apLocationId)) resolution.missing.insert(apLocationId);
             }
         }
     }
+    return resolution;
+}
 
-    if (!locationExists) return LocationCheckResult::UnknownLocation;
-    if (locations.empty()) return LocationCheckResult::AlreadyChecked;
+void Archipelago::ResetLocalLocationCache() {
+    clearedLocations_.clear();
+    clearedLocationsLoaded_ = false;
+}
 
-    ap->LocationChecks(locations);
-    Logger::Log("[AP] Sent ", locations.size(), " location checks for ", locationWithoutPrefix);
-    return LocationCheckResult::Sent;
+void Archipelago::LoadClearedLocations() {
+    if (clearedLocationsLoaded_) return;
+
+    clearedLocations_.clear();
+    clearedLocationsLoaded_ = true;
+    int32_t locationCount = LoadSavedValue(CLEARED_LOCATION_SAVE_PREFIX + "Count").value_or(0);
+    if (locationCount < 0 || locationCount > MAX_CLEARED_LOCATIONS) {
+        Logger::Log(LogLevel::Error, "[AP] Invalid saved cleared-location count: ", locationCount);
+        return;
+    }
+
+    for (int32_t index = 0; index < locationCount; index++) {
+        auto location = LoadSavedString(CLEARED_LOCATION_SAVE_PREFIX + std::to_string(index));
+        if (!location || !location->starts_with("AP_")) continue;
+        if (std::find(clearedLocations_.begin(), clearedLocations_.end(), *location) == clearedLocations_.end()) {
+            clearedLocations_.push_back(*location);
+        }
+    }
+    Logger::Log("[AP] Loaded ", clearedLocations_.size(), " locally cleared locations");
+}
+
+void Archipelago::RecordClearedLocation(const std::string& locationId) {
+    LoadClearedLocations();
+    if (std::find(clearedLocations_.begin(), clearedLocations_.end(), locationId) != clearedLocations_.end()) return;
+    if (clearedLocations_.size() >= static_cast<size_t>(MAX_CLEARED_LOCATIONS)) {
+        Logger::Log(LogLevel::Error, "[AP] Cleared-location save limit reached");
+        return;
+    }
+
+    size_t index = clearedLocations_.size();
+    SaveLocalString(CLEARED_LOCATION_SAVE_PREFIX + std::to_string(index), locationId);
+    SaveLocalValue(CLEARED_LOCATION_SAVE_PREFIX + "Count", static_cast<int32_t>(index + 1));
+    clearedLocations_.push_back(locationId);
+}
+
+size_t Archipelago::SendMissingClearedLocations() {
+    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return 0;
+
+    LoadClearedLocations();
+    const auto missingLocations = ap->get_missing_locations();
+    const auto checkedLocations = ap->get_checked_locations();
+    std::set<int64_t> locations;
+    for (const auto& clearedLocation : clearedLocations_) {
+        auto resolution = ResolveLocation(clearedLocation, missingLocations, checkedLocations);
+        locations.insert(resolution.missing.begin(), resolution.missing.end());
+    }
+
+    if (locations.empty()) return 0;
+    ap->LocationChecks(std::list<int64_t>(locations.begin(), locations.end()));
+    Logger::Log("[AP] Reconciled ", locations.size(), " missing location checks");
+    return locations.size();
+}
+
+LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationId) {
+    if (!locationId.starts_with("AP_")) return LocationCheckResult::UnknownLocation;
+    RecordClearedLocation(locationId);
+    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return LocationCheckResult::NotReady;
+
+    const auto missingLocations = ap->get_missing_locations();
+    const auto checkedLocations = ap->get_checked_locations();
+    auto requestedLocation = ResolveLocation(locationId, missingLocations, checkedLocations);
+    SendMissingClearedLocations();
+
+    if (!requestedLocation.exists) return LocationCheckResult::UnknownLocation;
+    return requestedLocation.missing.empty() ? LocationCheckResult::AlreadyChecked : LocationCheckResult::Sent;
 }
 
 void Archipelago::Sync() {
@@ -124,6 +197,7 @@ void Archipelago::Sync() {
         pendingReceivedItems_.clear();
         LoadLocalProgress();
         ap->Sync();
+        SendMissingClearedLocations();
     }
 }
 
@@ -142,23 +216,41 @@ static std::optional<int32_t> LoadSavedValue(const std::string& saveValueName) {
     return isValid ? std::optional<int32_t>(value) : std::nullopt;
 }
 
-void Archipelago::SaveConnectionInfo() const {
-    auto saveString = [this](const std::string& fieldName, const std::string& value) {
-        SaveLocalValue(CONNECTION_SAVE_PREFIX + fieldName + "Length", static_cast<int32_t>(value.size()));
-        for (size_t offset = 0; offset < value.size(); offset += 4) {
-            uint32_t packedValue = 0;
-            for (size_t byteIndex = 0; byteIndex < 4 && offset + byteIndex < value.size(); byteIndex++) {
-                packedValue |= static_cast<uint32_t>(static_cast<unsigned char>(value[offset + byteIndex]))
-                               << (byteIndex * 8);
-            }
-            SaveLocalValue(CONNECTION_SAVE_PREFIX + fieldName + std::to_string(offset / 4),
-                           static_cast<int32_t>(packedValue));
-        }
-    };
+static std::optional<std::string> LoadSavedString(const std::string& saveValueName) {
+    auto lengthValue = LoadSavedValue(saveValueName + "Length");
+    if (!lengthValue || *lengthValue < 0 || static_cast<size_t>(*lengthValue) > MAX_CONNECTION_FIELD_LENGTH) {
+        return std::nullopt;
+    }
 
-    saveString("Uri", currentUri_);
-    saveString("Slot", slotName_);
-    saveString("Password", password_);
+    std::string value(static_cast<size_t>(*lengthValue), '\0');
+    for (size_t offset = 0; offset < value.size(); offset += 4) {
+        auto packedValue = LoadSavedValue(saveValueName + std::to_string(offset / 4));
+        if (!packedValue) return std::nullopt;
+        uint32_t bytes = static_cast<uint32_t>(*packedValue);
+        for (size_t byteIndex = 0; byteIndex < 4 && offset + byteIndex < value.size(); byteIndex++) {
+            value[offset + byteIndex] = static_cast<char>((bytes >> (byteIndex * 8)) & 0xff);
+        }
+    }
+    return value;
+}
+
+void Archipelago::SaveLocalString(const std::string& saveValueName, const std::string& value) const {
+    SaveLocalValue(saveValueName + "Length", static_cast<int32_t>(value.size()));
+    for (size_t offset = 0; offset < value.size(); offset += 4) {
+        uint32_t packedValue = 0;
+        for (size_t byteIndex = 0; byteIndex < 4 && offset + byteIndex < value.size(); byteIndex++) {
+            packedValue |=
+                static_cast<uint32_t>(static_cast<unsigned char>(value[offset + byteIndex])) << (byteIndex * 8);
+        }
+        SaveLocalValue(saveValueName + std::to_string(offset / 4), static_cast<int32_t>(packedValue));
+    }
+}
+
+void Archipelago::SaveConnectionInfo() const {
+    SaveLocalString(CONNECTION_SAVE_PREFIX + "Uri", currentUri_);
+    SaveLocalString(CONNECTION_SAVE_PREFIX + "Slot", slotName_);
+    SaveLocalString(CONNECTION_SAVE_PREFIX + "Password", password_);
+
     SaveLocalValue(CONNECTION_SAVE_PREFIX + "DeathLink", wantsDeathlink_ ? 1 : 0);
     SaveLocalValue(CONNECTION_SAVE_PREFIX + "Version", CONNECTION_SAVE_VERSION);
     Logger::Log("[AP] Saved successful connection info to the current save");
@@ -168,27 +260,9 @@ std::optional<ArchipelagoConnectionInfo> Archipelago::LoadSavedConnectionInfo() 
     auto version = LoadSavedValue(CONNECTION_SAVE_PREFIX + "Version");
     if (!version || *version != CONNECTION_SAVE_VERSION) return std::nullopt;
 
-    auto loadString = [](const std::string& fieldName) -> std::optional<std::string> {
-        auto lengthValue = LoadSavedValue(CONNECTION_SAVE_PREFIX + fieldName + "Length");
-        if (!lengthValue || *lengthValue < 0 || static_cast<size_t>(*lengthValue) > MAX_CONNECTION_FIELD_LENGTH) {
-            return std::nullopt;
-        }
-
-        std::string value(static_cast<size_t>(*lengthValue), '\0');
-        for (size_t offset = 0; offset < value.size(); offset += 4) {
-            auto packedValue = LoadSavedValue(CONNECTION_SAVE_PREFIX + fieldName + std::to_string(offset / 4));
-            if (!packedValue) return std::nullopt;
-            uint32_t bytes = static_cast<uint32_t>(*packedValue);
-            for (size_t byteIndex = 0; byteIndex < 4 && offset + byteIndex < value.size(); byteIndex++) {
-                value[offset + byteIndex] = static_cast<char>((bytes >> (byteIndex * 8)) & 0xff);
-            }
-        }
-        return value;
-    };
-
-    auto uri = loadString("Uri");
-    auto slotName = loadString("Slot");
-    auto password = loadString("Password");
+    auto uri = LoadSavedString(CONNECTION_SAVE_PREFIX + "Uri");
+    auto slotName = LoadSavedString(CONNECTION_SAVE_PREFIX + "Slot");
+    auto password = LoadSavedString(CONNECTION_SAVE_PREFIX + "Password");
     auto deathLink = LoadSavedValue(CONNECTION_SAVE_PREFIX + "DeathLink");
     if (!uri || !slotName || !password || !deathLink || slotName->empty()) return std::nullopt;
 
@@ -333,6 +407,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     if (normalizedUri.starts_with("wss://")) normalizedUri.erase(0, 6);
     currentUri_ = normalizedUri;
     wantsDeathlink_ = wantsDeathlink;
+    ResetLocalLocationCache();
     localSavePrefix_.clear();
     localProgressLoaded_ = false;
     lastReceivedItemIndex_ = -1;
@@ -385,6 +460,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     ap->set_data_package_changed_handler([this](const json& data) {
         Logger::Log("[AP] Data package loaded for game: ", GAME_NAME);
         ProcessReceivedItems();
+        SendMissingClearedLocations();
         HookManager::ApplyCompatibilityShardMasterData();
     });
 
@@ -397,6 +473,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
                            std::to_string(ap->get_player_number()) + "_";
         LoadLocalProgress();
         UpdateState(ArchipelagoConnectionState::SlotConnected);
+        SendMissingClearedLocations();
         HookManager::ApplyCompatibilityShardMasterData();
         SaveConnectionInfo();
 

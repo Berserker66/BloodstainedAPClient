@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -54,6 +55,7 @@ class Archipelago {
     void Disconnect();
     void Poll();
     void Sync();
+    void ResetLocalLocationCache();
     std::optional<ArchipelagoConnectionInfo> LoadSavedConnectionInfo() const;
 
     LocationCheckResult SendLocationChecks(const std::string& locationId);
@@ -67,9 +69,13 @@ class Archipelago {
    private:
     void AbortPassword();
     void ConnectSlot();
+    void LoadClearedLocations();
     void LoadLocalProgress();
     void ProcessReceivedItems();
+    void RecordClearedLocation(const std::string& locationId);
     void SaveConnectionInfo() const;
+    void SaveLocalString(const std::string& name, const std::string& value) const;
+    size_t SendMissingClearedLocations();
     void SaveLocalValue(const std::string& name, int32_t value) const;
     void UpdateState(ArchipelagoConnectionState newState);
 
@@ -89,8 +95,10 @@ class Archipelago {
     mutable bool pendingDeathlink_ = false;
     mutable bool wantsDeathlink_ = false;
     bool localProgressLoaded_ = false;
+    bool clearedLocationsLoaded_ = false;
 
     std::map<int64_t, APClient::NetworkItem> pendingReceivedItems_;
+    std::vector<std::string> clearedLocations_;
     json slotData_;
 
     int64_t shardDropInitialGrade_;

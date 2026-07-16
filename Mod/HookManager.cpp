@@ -364,6 +364,7 @@ bool HookManager::Init() {
     // When game and player completely load in
     NotifyOnClassFunction("PBGameMode_Miriam_BP_C", "OnLoadGameCompletely", [](void* obj) {
         GameManager::Instance().PlayerAlive();
+        Archipelago::Instance().ResetLocalLocationCache();
         Gui::Instance().TryAutoConnect();
         APBridge::Instance().EnqueueSync();
         Logger::Log("Player respawned");
@@ -484,9 +485,7 @@ bool HookManager::PostInit() {
 
         if (!popupText.starts_with("AP_")) return;
 
-        auto* archipelago = Archipelago::ConnectedInstance();
-        if (!archipelago) return;
-        if (archipelago->SendLocationChecks(popupText) == LocationCheckResult::Sent) {
+        if (Archipelago::Instance().SendLocationChecks(popupText) == LocationCheckResult::Sent) {
             Logger::Log("[ItemGetPopup] Sent location check:", popupText);
         }
     });
