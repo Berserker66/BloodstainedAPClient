@@ -10,6 +10,8 @@ class Gui {
     bool Init();
     void Shutdown();
     void Render();
+    void TryAutoConnect();
+    void ResetAutoConnect() { m_AutoConnectAttempted = false; }
 
     void ToggleMenu() { m_Open = !m_Open; }
     bool IsOpen() const { return m_Open; }
@@ -42,6 +44,7 @@ class Gui {
     bool m_ImGuiInit = false;
     bool m_Open = false;
     bool m_IsResizing = false;
+    bool m_AutoConnectAttempted = false;
 
     WNDPROC m_OriginalWndProc = nullptr;
     HWND m_GameWindow = nullptr;

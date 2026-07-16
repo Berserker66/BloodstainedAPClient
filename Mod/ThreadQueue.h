@@ -16,10 +16,14 @@ class ThreadQueue {
     }
 
     void Flush() {
-        std::lock_guard<std::mutex> lock(mutex);
-        while (!queue.empty()) {
-            queue.front()();
-            queue.pop();
+        std::queue<std::function<void()>> pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            pending.swap(queue);
+        }
+        while (!pending.empty()) {
+            pending.front()();
+            pending.pop();
         }
     }
 

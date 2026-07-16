@@ -47,6 +47,25 @@ static char s_Console[256] = "";
 static bool s_Connected = false;
 static bool s_wantsDeathlink = false;
 
+static void CopyConnectionField(char* destination, size_t destinationSize, const std::string& value) {
+    strncpy_s(destination, destinationSize, value.c_str(), _TRUNCATE);
+}
+
+static void PopulateConnectionFields(const ArchipelagoConnectionInfo& connectionInfo) {
+    std::string address = connectionInfo.uri;
+    if (address.starts_with("ws://")) address.erase(0, 5);
+    if (address.starts_with("wss://")) address.erase(0, 6);
+
+    size_t portSeparator = address.rfind(':');
+    std::string host = portSeparator == std::string::npos ? address : address.substr(0, portSeparator);
+    std::string port = portSeparator == std::string::npos ? "" : address.substr(portSeparator + 1);
+    CopyConnectionField(s_Host, IM_ARRAYSIZE(s_Host), host);
+    CopyConnectionField(s_Port, IM_ARRAYSIZE(s_Port), port);
+    CopyConnectionField(s_SlotName, IM_ARRAYSIZE(s_SlotName), connectionInfo.slotName);
+    CopyConnectionField(s_Password, IM_ARRAYSIZE(s_Password), connectionInfo.password);
+    s_wantsDeathlink = connectionInfo.wantsDeathlink;
+}
+
 static void RenderArchipelagoPanel() {
     ImGui::SeparatorText("Archipelago");
 
@@ -78,12 +97,7 @@ static void RenderArchipelagoPanel() {
         ImGui::Checkbox("DeathLink", &s_wantsDeathlink);
 
         if (ImGui::Button("Connect")) {
-            std::string uri = "";
-            if (strcmp(s_Host, "localhost") == 0 || strcmp(s_Host, "127.0.0.1") == 0) {
-                uri = std::string("ws://") + s_Host + ":" + s_Port;
-            } else {
-                uri = std::string("wss://") + s_Host + ":" + s_Port;
-            }
+            std::string uri = std::string(s_Host) + ":" + s_Port;
 
             if (s_SlotName[0] != '\0') {
                 Logger::Log("Tried to connect to AP");
@@ -124,7 +138,6 @@ static void RenderArchipelagoPanel() {
         }
     }
 
-    ImGui::Spacing();
 }
 
 static void RenderDebugInfoPanel() {
@@ -194,6 +207,22 @@ static void RenderDebugInfoPanel() {
 Gui& Gui::Instance() {
     static Gui instance;
     return instance;
+}
+
+void Gui::TryAutoConnect() {
+    if (m_AutoConnectAttempted) return;
+    m_AutoConnectAttempted = true;
+
+    auto connectionInfo = Archipelago::Instance().LoadSavedConnectionInfo();
+    if (!connectionInfo) {
+        Logger::Log("[AP] No saved connection info for this save");
+        return;
+    }
+
+    PopulateConnectionFields(*connectionInfo);
+    Logger::Log("[AP] Trying the saved connection once");
+    APBridge::Instance().EnqueueConnect(connectionInfo->slotName, connectionInfo->password, connectionInfo->uri,
+                                        connectionInfo->wantsDeathlink);
 }
 
 // Verified 100% correct, DO NOT MODIFY

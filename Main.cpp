@@ -11,6 +11,7 @@
 #include "Mod/Gui.h"
 #include "Mod/HookManager.h"
 #include "Mod/Logger.h"
+#include "imgui.h"
 #include "kiero.h"
 #include "version/version.h"
 
@@ -32,8 +33,17 @@ LRESULT __stdcall HookWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return CallWindowProc((WNDPROC)Gui::Instance().GetOriginalWndProc(), hwnd, msg, wParam, lParam);
     }
 
-    if (Gui::Instance().IsOpen() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam)) {
-        return CallWindowProc((WNDPROC)Gui::Instance().GetOriginalWndProc(), hwnd, msg, wParam, lParam);
+    if (Gui::Instance().IsOpen() && Gui::Instance().IsImGuiInit()) {
+        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
+
+        const bool isKeyboardMessage = msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN ||
+                                       msg == WM_SYSKEYUP || msg == WM_CHAR || msg == WM_SYSCHAR || msg == WM_UNICHAR;
+        const bool isMouseMessage = msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST;
+        const ImGuiIO& io = ImGui::GetIO();
+        if ((isKeyboardMessage && (io.WantCaptureKeyboard || io.WantTextInput)) ||
+            (isMouseMessage && io.WantCaptureMouse)) {
+            return 0;
+        }
     }
     return CallWindowProc((WNDPROC)Gui::Instance().GetOriginalWndProc(), hwnd, msg, wParam, lParam);
 }
@@ -102,7 +112,6 @@ DWORD APIENTRY MainThread(HMODULE Module) {
 
     Logger::Log("Ready to Game!");
 
-    FreeLibraryAndExitThread(Module, 0);
     return 0;
 }
 

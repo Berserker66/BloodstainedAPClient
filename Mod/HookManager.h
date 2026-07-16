@@ -46,6 +46,8 @@ class HookManager {
     }
 
     static bool playerDetected;
+    static void ApplyCompatibilityShardMasterData();
+    static void ResetCompatibilityShardMasterData();
 
    private:
     HookManager() = default;
@@ -71,6 +73,7 @@ class HookManager {
     }
 
     static void HOOKED_ProcessEvent(SDK::UObject* obj, SDK::UFunction* func, void* params) {
+        ProcessEventBefore(obj, func, params);
         originalProcessEvent(obj, func, params);
         if (obj && func) {
             HookManager::Instance().ProcessEvent(obj, func, params);
@@ -90,4 +93,5 @@ class HookManager {
     static std::set<std::string> processedWidgets;
     static void (*originalProcessEvent)(SDK::UObject*, SDK::UFunction*, void*);
     static void (*originalProcessLocalScriptFunction)(SDK::UObject*, SDK::UFunction*, void*);
+    static void ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, void* params);
 };

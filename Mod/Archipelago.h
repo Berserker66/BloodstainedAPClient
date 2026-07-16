@@ -1,10 +1,24 @@
 #pragma once
 #include <apclient.hpp>
+#include <cstdint>
 #include <fstream>
+#include <map>
+#include <optional>
 #include <set>
 #include <string>
 
 using json = nlohmann::json;
+
+struct ArchipelagoConnectionInfo {
+    std::string uri;
+    std::string slotName;
+    std::string password;
+    bool wantsDeathlink = false;
+};
+
+enum class LocationCheckResult { NotReady, UnknownLocation, Sent };
+
+enum class ItemLookupResult { NotReady, UnknownItem, KnownItem };
 
 enum class ArchipelagoConnectionState {
     Disconnected = 0,
@@ -40,21 +54,24 @@ class Archipelago {
     void Disconnect();
     void Poll();
     void Sync();
+    std::optional<ArchipelagoConnectionInfo> LoadSavedConnectionInfo() const;
 
-    void SendLocationChecks(const std::string& locationId);
+    LocationCheckResult SendLocationChecks(const std::string& locationId);
+    ItemLookupResult GetItemLookupResult(const std::string& itemName) const;
 
     void ExecuteConsoleCommand(const char* command);
 
     void BaelDefeated();
-    void ResetLocalIndex() { lastReceivedItemIndex_ = -1; };
-    void UpdateServerLastIndex();
     void InvokeDeathLink();
-    void LockStartingInventory();
-    void ResetRecievedStartingInventory() const { recievedStartingInventory_ = false; };
 
    private:
     void AbortPassword();
     void ConnectSlot();
+    LocationCheckResult GetLocationCheckResult(const std::string& locationId) const;
+    void LoadLocalProgress();
+    void ProcessReceivedItems();
+    void SaveConnectionInfo() const;
+    void SaveLocalValue(const std::string& name, int32_t value) const;
     void UpdateState(ArchipelagoConnectionState newState);
 
     // General Management Actions
@@ -63,35 +80,23 @@ class Archipelago {
     ArchipelagoConnectionState state_;
     std::string currentUri_;
     std::string slotName_;
-    int playerSlot_ = 0;
     std::string password_;
-    int itemsHandling_ = 0b0001;  // Send items from other players
+    std::string localSavePrefix_;
+    int itemsHandling_ = 0b111;  // Send all received items, including starting inventory
     std::set<int64_t> missingLocations_;
     std::set<int64_t> checkedLocations_;
 
     mutable std::string lastError_;
     mutable int64_t lastReceivedItemIndex_ = -1;
-    mutable bool queueLastIndexReset_ = false;
-    mutable bool wantsStartingInventory_ = false;
-    mutable bool recievedStartingInventory_ = false;
-    mutable bool startingInventoryLocked = false;
+    int64_t lastQueuedItemIndex_ = -1;
     mutable bool pendingDeathlink_ = false;
     mutable bool wantsDeathlink_ = false;
-    mutable bool checkingIndex_ = false;
-    mutable bool checkingStartInventory_ = false;
+    bool localProgressLoaded_ = false;
 
-    std::list<APClient::NetworkItem> items_;
+    std::map<int64_t, APClient::NetworkItem> pendingReceivedItems_;
     json slotData_;
 
     int64_t shardDropInitialGrade_;
-
-    // Holds Data stored on server
-    // slot:1:lock_starting_inventory
-    // slot:1:index
-    struct {
-        std::string startingInventoryLockedSlot;
-        std::string lastIndexSlot;
-    } SlotDataStore_;
 
     std::list<std::string> deathReasons_ = {"Dominiques elbow was too strong for Miriam.",
                                             "Johannes failed at at making his latest potion",
