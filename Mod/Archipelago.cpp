@@ -445,7 +445,10 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     ap->set_print_handler([this](const std::string& msg) { Logger::Log("[AP] Raw print: ", msg); });
 
     ap->set_print_json_handler([](const APClient::PrintJSONArgs& args) {
-        if (args.type != "ItemSend" || !ap) return;
+        if (args.type != "ItemSend" || !args.item || !args.receiving || !ap) return;
+        int player = ap->get_player_number();
+        if (args.item->player != player && *args.receiving != player) return;
+
         std::string notification = ap->render_json(args.data);
         if (!notification.empty()) GameManager::Instance().SendInGameNotification(notification, 1023);
     });
