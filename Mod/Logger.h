@@ -40,10 +40,7 @@ class Logger {
         ((stream << std::forward<Args>(args) << ' '), ...);
 
         if (level == LogLevel::File) {
-            std::ofstream myfile;
-            myfile.open("Debug.txt", std::ios_base::app);
-            myfile << stream.str() << std::endl;
-            myfile.close();
+            WriteFile(stream.str());
             return;
         }
         HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -76,6 +73,8 @@ class Logger {
     }
 
    private:
+    static void WriteFile(const std::string& message);
+
     template <typename T>
     static std::string GetName(T* obj) {
         if (obj == nullptr) return "Null";

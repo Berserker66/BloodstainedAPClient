@@ -15,6 +15,7 @@
 #include "CoreUObject_classes.hpp"
 #include "GameManager.h"
 #include "Gui.h"
+#include "InGameTracker.h"
 #include "ItemGetPopup_classes.hpp"
 #include "Logger.h"
 #include "Mod/Archipelago.h"
@@ -28,6 +29,7 @@ std::set<std::string> HookManager::processedWidgets;
 void (*HookManager::originalProcessEvent)(SDK::UObject*, SDK::UFunction*, void*) = nullptr;
 void (*HookManager::originalProcessLocalScriptFunction)(SDK::UObject*, SDK::UFunction*, void*) = nullptr;
 bool HookManager::playerDetected = false;
+bool HookManager::shuttingDown = false;
 
 struct ShardAppearance {
     SDK::EShardType type;
@@ -375,6 +377,9 @@ bool HookManager::Init() {
 }
 
 bool HookManager::PostInit() {
+    NotifyOnClassFunction("MapManageBlueprint_C", "Event_MapStart",
+                          [](void* obj) { InGameTracker::Instance().ApplyMapMarkers(obj); });
+
     // Whens constantly when the player is alive
     NotifyOnClassFunction("Chr_P0000_C", "GetAdditionalCameraTargetLocations", [](void* obj) {
         if (!Archipelago::ConnectedInstance()) return;
@@ -497,6 +502,11 @@ bool HookManager::PostInit() {
 void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, void* params) {
     if (!obj || !func) return;
     std::string functionName = func->Name.GetRawString();
+
+    if (functionName == "QuitGame" || functionName == "QuitGameYes") {
+        shuttingDown = true;
+        Archipelago::Instance().Shutdown();
+    }
 
     // UserConstructionScript selects the shard actor's material. Restore the vanilla
     // ID before that script runs so compatibility shards use their real category color.

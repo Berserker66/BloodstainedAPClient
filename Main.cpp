@@ -7,6 +7,8 @@
 #include <iostream>
 #include <thread>
 
+#include "Mod/APBridge.h"
+#include "Mod/Archipelago.h"
 #include "Mod/GameManager.h"
 #include "Mod/Gui.h"
 #include "Mod/HookManager.h"
@@ -17,9 +19,28 @@
 
 long __stdcall HookedPresent(IDXGISwapChain* swapChain, unsigned int syncInterval, unsigned int flags);
 
+namespace {
+constexpr UINT_PTR ARCHIPELAGO_POLL_TIMER_ID = 0x4150;
+constexpr UINT ARCHIPELAGO_POLL_INTERVAL_MS = 100;
+}
+
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 LRESULT __stdcall HookWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_TIMER && wParam == ARCHIPELAGO_POLL_TIMER_ID) {
+        if (!HookManager::shuttingDown && GameManager::Instance().IsInitialized()) {
+            APBridge::Instance().ProcessPending();
+            Archipelago::Instance().Poll();
+        }
+        return 0;
+    }
+
+    if (msg == WM_CLOSE || msg == WM_DESTROY) {
+        HookManager::shuttingDown = true;
+        KillTimer(hwnd, ARCHIPELAGO_POLL_TIMER_ID);
+        Archipelago::Instance().Shutdown();
+    }
+
     // Track resize state
     if (msg == WM_ENTERSIZEMOVE) {
         Gui::Instance().SetResizing(true);
@@ -54,6 +75,12 @@ BOOL APIENTRY InitKieroAndHook() {
     if (hwnd) {
         WNDPROC originalWndProc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)HookWndProc);
         Gui::Instance().SetOriginalWndProc(originalWndProc);
+        if (!SetTimer(hwnd, ARCHIPELAGO_POLL_TIMER_ID, ARCHIPELAGO_POLL_INTERVAL_MS, nullptr)) {
+            Logger::Log(LogLevel::File, "[AP] Failed to install pause-safe network timer; error:", GetLastError());
+        } else {
+            Logger::Log(LogLevel::File, "[AP] Installed pause-safe network timer; interval ms:",
+                        ARCHIPELAGO_POLL_INTERVAL_MS);
+        }
         Logger::Log("WndProc Hooked");
     }
 
@@ -93,9 +120,7 @@ DWORD APIENTRY MainThread(HMODULE Module) {
     char dllName[MAX_PATH];
     GetModuleFileNameA(Module, dllName, MAX_PATH);
 
-#ifdef _DEBUG
     Logger::Init();
-#endif
     Logger::Log("Starting Bloodstained Modding SDK");
 
     while (!GameManager::Instance().Init()) Sleep(500);

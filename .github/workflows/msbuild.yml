@@ -65,9 +65,9 @@ jobs:
         uses: actions/upload-artifact@v4
         if: github.ref == 'refs/heads/main'
         with:
-          name: BloodstainedModdingSDK-Debug-x64
+          name: BloodstainedAP-Release-x64
           path: |
-            x64\Release\version.dll
+            x64\Release\BloodstainedAP.asi
           if-no-files-found: error
       #       x64\Debug\*.dll
       #       x64\Debug\*.pdb

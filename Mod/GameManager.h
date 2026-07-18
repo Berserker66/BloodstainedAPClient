@@ -52,6 +52,7 @@ class GameManager {
     bool IsInitialized();
     bool IsInstanceValid(SDK::UObject* object, const char* str);
     bool PopulateDisplayToItemIdTable();
+    bool CanReceiveItems();
 
     void GivePlayerItem(const std::string& name, bool shouldDisplay = true, int count = 1);
     void GivePlayerCoin(SDK::int32 amount, bool shouldDisplay = true);

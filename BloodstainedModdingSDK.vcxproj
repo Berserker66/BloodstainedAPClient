@@ -76,12 +76,14 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <BSGamePath>C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
-    <TargetName>version</TargetName>
+    <TargetName>BloodstainedAP</TargetName>
+    <TargetExt>.asi</TargetExt>
     <ExternalIncludePath>CppSDK;CppSDK/SDK;subprojects;$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <BSGamePath>C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
-    <TargetName>version</TargetName>
+    <TargetName>BloodstainedAP</TargetName>
+    <TargetExt>.asi</TargetExt>
     <ExternalIncludePath>CppSDK;CppSDK/SDK;subprojects;$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -131,7 +133,8 @@
       <AdditionalDependencies>vcpkg_installed\x64-windows-static-md\lib\libcrypto.lib;vcpkg_installed\x64-windows-static-md\lib\libssl.lib;vcpkg_installed\x64-windows-static-md\lib\zlib.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /Y /F "$(TargetPath)" "$(BSGamePath)\"</Command>
+      <Command>if not exist "$(BSGamePath)\plugins\" mkdir "$(BSGamePath)\plugins"
+copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -156,7 +159,8 @@
       <AdditionalDependencies>vcpkg_installed\x64-windows-static-md\lib\libcrypto.lib;vcpkg_installed\x64-windows-static-md\lib\libssl.lib;vcpkg_installed\x64-windows-static-md\lib\zlib.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /Y /F "$(TargetPath)" "$(BSGamePath)\"</Command>
+      <Command>if not exist "$(BSGamePath)\plugins\" mkdir "$(BSGamePath)\plugins"
+copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -186,10 +190,13 @@
     <ClCompile Include="Mod\GameManager.cpp" />
     <ClCompile Include="Mod\Gui.cpp" />
     <ClCompile Include="Mod\HookManager.cpp" />
+    <ClCompile Include="Mod\InGameTracker.cpp" />
     <ClCompile Include="Mod\IToggleMod.cpp" />
     <ClCompile Include="Mod\Logger.cpp" />
     <ClCompile Include="Mod\ModRunner.cpp" />
     <ClCompile Include="Mod\ToggleMods.cpp" />
+    <ClCompile Include="Mod\Tracker.cpp" />
+    <ClCompile Include="Mod\TrackerRuleEvaluator.cpp" />
     <ClCompile Include="Mod\Utils.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -223,14 +230,25 @@
     <ClInclude Include="Mod\HookManager.h" />
     <ClInclude Include="Mod\IToggleMod.h" />
     <ClInclude Include="Mod\Logger.h" />
+    <ClInclude Include="Mod\Resource.h" />
     <ClInclude Include="Mod\ModRunner.h" />
     <ClInclude Include="Mod\NotifyObject.h" />
     <ClInclude Include="Mod\ToggleMods.h" />
+    <ClInclude Include="Mod\Tracker.h" />
+    <ClInclude Include="Mod\InGameTracker.h" />
+    <ClInclude Include="Mod\TrackerData.generated.h" />
+    <ClInclude Include="Mod\TrackerRuleEvaluator.h" />
+    <ClInclude Include="Mod\TrackerRules.generated.h" />
     <ClInclude Include="Mod\Utils.h" />
     <ClInclude Include="version\version.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="version\version.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Assets\chest-marker.png" />
+    <Image Include="Assets\wall-marker.png" />
+    <ResourceCompile Include="BloodstainedAP.rc" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="Notes.txt" />

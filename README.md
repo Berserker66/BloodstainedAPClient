@@ -22,6 +22,11 @@ the SDK will function on other platforms.
 ## Archipelago:
 Instructions can be found here: [Archipelago Setup Guide for Bloodstained: Ritual of the Night](https://github.com/vgfreak95/BloodstainedAP/blob/bloodstained/worlds/bloodstained_rotn/docs/setup_en.md)
 
+## Troubleshooting
+The Release client writes connection transitions and location-check reconciliation to
+`%LOCALAPPDATA%\BloodstainedRotN\Saved\Logs\BloodstainedAP.log`. Include that file with the matching Archipelago
+server log when reporting connection or missing-check problems.
+
 ## Building from Source:
 
 ### Prerequisites:
@@ -35,7 +40,7 @@ Instructions can be found here: [Archipelago Setup Guide for Bloodstained: Ritua
 4. Open the `BloodstainedModdingSDK.vcxproj` and modify the `<BSGamePath>` sections to match your Games target destination.
 5. There are 2 Configurations available (Release WIP), use Debug x64 (should be default), then in Visual Studio, at the top Build -> Build Solution.
 6. If there are any errors check FAQ section (WIP).
-7. The project currently emits `version.dll`. Rename the built file to `BloodstainedAP.asi` and copy it into the Plugins Directory; do not install it as `version.dll` in the Game Shipping Directory.
+7. The project emits `BloodstainedAP.asi` and copies it into the Plugins Directory automatically after a successful build.
 8. Launch the game and load a save, then press `F5` to open the mod menu. Explore the GUI and add custom content inside `Mod\Gui.cpp`.
 
 ## Contributing:

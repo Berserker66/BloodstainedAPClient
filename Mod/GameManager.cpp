@@ -102,6 +102,12 @@ bool GameManager::PostInit() {
 
 bool GameManager::IsInitialized() { return initCompleted && postInitCompleted ? true : false; }
 
+bool GameManager::CanReceiveItems() {
+    if (!IsPlayerLoadedInGame()) return false;
+    auto* player = Player();
+    return player && player->CharacterInventory && !DisplayNameToItemId.empty();
+}
+
 void GameManager::CheckBossSoftlock() {
     Logger::Log("Softlock fix triggered");
     auto instance = (SDK::UPBGameInstance*)GameManager::Instance().GameInstance();

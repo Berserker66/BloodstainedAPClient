@@ -1,0 +1,4 @@
+#include "Mod/Resource.h"
+
+IDR_WALL_MARKER_PNG RCDATA "Assets/wall-marker.png"
+IDR_CHEST_MARKER_PNG RCDATA "Assets/chest-marker.png"

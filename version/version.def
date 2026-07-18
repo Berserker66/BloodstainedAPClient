@@ -1,4 +1,4 @@
-LIBRARY version.dll
+LIBRARY BloodstainedAP.asi
 EXPORTS
 	GetFileVersionInfoA=GetFileVersionInfoA_wrapper @1
 	GetFileVersionInfoByHandle=GetFileVersionInfoByHandle_wrapper @2

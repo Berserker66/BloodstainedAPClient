@@ -46,6 +46,7 @@ class HookManager {
     }
 
     static bool playerDetected;
+    static bool shuttingDown;
     static void ApplyCompatibilityShardMasterData();
     static void ResetCompatibilityShardMasterData();
 
@@ -61,12 +62,14 @@ class HookManager {
         auto* uobj = static_cast<SDK::UObject*>(obj);
         std::string className = uobj->Class->Name.ToString();
         std::string funcName = func->Name.GetRawString();
-        if (funcName == "ReceiveTick" || funcName == "Tick") {
+        const bool isTick = funcName == "ReceiveTick" || funcName == "Tick";
+        if (isTick) {
             ThreadQueue::Instance().Flush();
-        }
-        if (GameManager::Instance().IsInitialized() && !GameManager::Instance().IsPlayerDead()) {
-            APBridge::Instance().ProcessPending();
-            Archipelago::Instance().Poll();
+            if (!shuttingDown && GameManager::Instance().IsInitialized() &&
+                !GameManager::Instance().IsPlayerDead()) {
+                APBridge::Instance().ProcessPending();
+                Archipelago::Instance().Poll();
+            }
         }
 
         notifyObject.OnProcessEvent(obj, className, funcName, params);
