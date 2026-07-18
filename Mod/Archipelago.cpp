@@ -26,6 +26,7 @@ double deathtime = -1;
 bool awaiting_password = false;
 
 const std::string GAME_NAME = "Bloodstained: Ritual of the Night";
+const APClient::Version CLIENT_VERSION = {0, 6, 5};
 std::string game_seed;
 const int MAX_SEED_LENGTH = 32;
 
@@ -70,7 +71,7 @@ void Archipelago::ConnectSlot() {
             if (wantsDeathlink_) {
                 tags.push_back("DeathLink");
             }
-            _connected = ap->ConnectSlot(slotName_, password_, itemsHandling_, tags);
+            _connected = ap->ConnectSlot(slotName_, password_, itemsHandling_, tags, CLIENT_VERSION);
             if (_connected) {
                 ap_slot_connect_sent = true;
                 Logger::Log("[AP] Connection from here was successful.");
