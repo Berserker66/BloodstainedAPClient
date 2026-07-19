@@ -71,19 +71,6 @@ LRESULT __stdcall HookWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 // Salvaged Code from Livestream
 BOOL APIENTRY InitKieroAndHook() {
-    HWND hwnd = Gui::Instance().GetGameWindow();
-    if (hwnd) {
-        WNDPROC originalWndProc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)HookWndProc);
-        Gui::Instance().SetOriginalWndProc(originalWndProc);
-        if (!SetTimer(hwnd, ARCHIPELAGO_POLL_TIMER_ID, ARCHIPELAGO_POLL_INTERVAL_MS, nullptr)) {
-            Logger::Log(LogLevel::File, "[AP] Failed to install pause-safe network timer; error:", GetLastError());
-        } else {
-            Logger::Log(LogLevel::File, "[AP] Installed pause-safe network timer; interval ms:",
-                        ARCHIPELAGO_POLL_INTERVAL_MS);
-        }
-        Logger::Log("WndProc Hooked");
-    }
-
     kiero::init(kiero::RenderType::D3D11);
 
     if (kiero::bind(8, (void**)&Gui::originalPresent, (void*)HookedPresent) == kiero::Status::Success) {
@@ -96,6 +83,31 @@ BOOL APIENTRY InitKieroAndHook() {
     }
 }
 
+bool InstallGameWindowHooks() {
+    HWND hwnd = Gui::Instance().GetGameWindow();
+    if (!hwnd) {
+        Logger::Log(LogLevel::File, "[AP] Cannot install window hooks without a swap-chain game window");
+        return false;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    WNDPROC originalWndProc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)HookWndProc);
+    if (!originalWndProc && GetLastError() != ERROR_SUCCESS) {
+        Logger::Log(LogLevel::File, "[AP] Failed to install game-window input hook; error:", GetLastError());
+        return false;
+    }
+
+    Gui::Instance().SetOriginalWndProc(originalWndProc);
+    if (!SetTimer(hwnd, ARCHIPELAGO_POLL_TIMER_ID, ARCHIPELAGO_POLL_INTERVAL_MS, nullptr)) {
+        Logger::Log(LogLevel::File, "[AP] Failed to install pause-safe network timer; error:", GetLastError());
+    } else {
+        Logger::Log(LogLevel::File, "[AP] Installed pause-safe network timer; interval ms:",
+                    ARCHIPELAGO_POLL_INTERVAL_MS);
+    }
+    Logger::Log(LogLevel::File, "[AP] Installed input hook on swap-chain game window:", (DWORD_PTR)hwnd);
+    return true;
+}
+
 void renderGui() {
     if (!Gui::Instance().IsImGuiInit()) return;
 
@@ -106,9 +118,10 @@ long __stdcall HookedPresent(IDXGISwapChain* swapChain, unsigned int syncInterva
     static bool init = false;
 
     if (!init) {
-        init = true;
-        Gui::Instance().InitImGui(swapChain);
-        Logger::Log("Present hooked - GUI initialized");
+        if (Gui::Instance().InitImGui(swapChain) && InstallGameWindowHooks()) {
+            init = true;
+            Logger::Log("Present hooked - GUI initialized");
+        }
     }
 
     renderGui();

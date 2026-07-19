@@ -168,6 +168,7 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     <ClCompile Include="CppSDK\SDK\CoreUObject_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\Engine_functions.cpp" />
     <ClCompile Include="CppSDK\SDK\ProjectBlood_functions.cpp" />
+    <ClCompile Include="CppSDK\SDK\UMG_functions.cpp" />
     <ClCompile Include="extern\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="extern\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="extern\imgui\imgui.cpp" />
@@ -193,6 +194,7 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     <ClCompile Include="Mod\InGameTracker.cpp" />
     <ClCompile Include="Mod\IToggleMod.cpp" />
     <ClCompile Include="Mod\Logger.cpp" />
+    <ClCompile Include="Mod\MainMenuStatus.cpp" />
     <ClCompile Include="Mod\ModRunner.cpp" />
     <ClCompile Include="Mod\ToggleMods.cpp" />
     <ClCompile Include="Mod\Tracker.cpp" />
@@ -230,6 +232,8 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     <ClInclude Include="Mod\HookManager.h" />
     <ClInclude Include="Mod\IToggleMod.h" />
     <ClInclude Include="Mod\Logger.h" />
+    <ClInclude Include="Mod\ClientVersion.h" />
+    <ClInclude Include="Mod\MainMenuStatus.h" />
     <ClInclude Include="Mod\Resource.h" />
     <ClInclude Include="Mod\ModRunner.h" />
     <ClInclude Include="Mod\NotifyObject.h" />

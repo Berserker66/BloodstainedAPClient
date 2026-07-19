@@ -18,6 +18,7 @@
 #include "InGameTracker.h"
 #include "ItemGetPopup_classes.hpp"
 #include "Logger.h"
+#include "MainMenuStatus.h"
 #include "Mod/Archipelago.h"
 #include "ProjectBlood_classes.hpp"
 #include "SDK.hpp"
@@ -365,12 +366,16 @@ bool HookManager::Init() {
 
     // When game and player completely load in
     NotifyOnClassFunction("PBGameMode_Miriam_BP_C", "OnLoadGameCompletely", [](void* obj) {
+        MainMenuStatus::Instance().Hide();
         GameManager::Instance().PlayerAlive();
         Archipelago::Instance().ResetLocalLocationCache();
         Gui::Instance().TryAutoConnect();
         APBridge::Instance().EnqueueSync();
         Logger::Log("Player respawned");
     });
+
+    NotifyOnClassFunction("TitleMainMenu_C", "Tick",
+                          [](void* obj) { MainMenuStatus::Instance().Show(static_cast<SDK::UObject*>(obj)); });
 
     Logger::Log("HookManager initialized successfully");
     return true;

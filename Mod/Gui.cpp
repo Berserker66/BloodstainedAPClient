@@ -253,6 +253,18 @@ bool Gui::InitImGui(IDXGISwapChain* swapChain) {
 
     if (!swapChain) return false;
 
+    DXGI_SWAP_CHAIN_DESC swapChainDescription{};
+    if (FAILED(swapChain->GetDesc(&swapChainDescription)) || !swapChainDescription.OutputWindow) {
+        Logger::Log(LogLevel::File, "[AP] Failed to resolve the game window from the DX11 swap chain");
+        return false;
+    }
+
+    m_GameWindow = swapChainDescription.OutputWindow;
+    RECT clientRect{};
+    GetClientRect(m_GameWindow, &clientRect);
+    Logger::Log(LogLevel::File, "[AP] Resolved swap-chain game window:", (DWORD_PTR)m_GameWindow,
+                "client size:", clientRect.right - clientRect.left, "x", clientRect.bottom - clientRect.top);
+
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
 
@@ -314,6 +326,7 @@ void Gui::Render() {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
+    ImGui::SetNextWindowSizeConstraints(ImVec2(325.0f, 134.0f), ImVec2(FLT_MAX, FLT_MAX));
     bool menuOpened = ImGui::Begin("Mod Menu", &m_Open, ImGuiWindowFlags_AlwaysAutoResize);
 
     if (menuOpened) {

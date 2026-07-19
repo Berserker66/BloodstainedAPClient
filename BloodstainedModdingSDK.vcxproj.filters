@@ -74,6 +74,9 @@
     <ClCompile Include="Mod\Logger.cpp">
       <Filter>Source Files\Mod\Sources</Filter>
     </ClCompile>
+    <ClCompile Include="Mod\MainMenuStatus.cpp">
+      <Filter>Source Files\Mod\Sources</Filter>
+    </ClCompile>
     <ClCompile Include="Mod\HookManager.cpp">
       <Filter>Source Files\Mod\Sources</Filter>
     </ClCompile>
@@ -87,6 +90,9 @@
       <Filter>Source Files\GameSDK\Sources</Filter>
     </ClCompile>
     <ClCompile Include="CppSDK\SDK\ProjectBlood_functions.cpp">
+      <Filter>Source Files\GameSDK\Sources</Filter>
+    </ClCompile>
+    <ClCompile Include="CppSDK\SDK\UMG_functions.cpp">
       <Filter>Source Files\GameSDK\Sources</Filter>
     </ClCompile>
     <ClCompile Include="Mod\GameManager.cpp">
@@ -164,6 +170,12 @@
       <Filter>Source Files\Mod\Headers</Filter>
     </ClInclude>
     <ClInclude Include="Mod\Logger.h">
+      <Filter>Source Files\Mod\Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\ClientVersion.h">
+      <Filter>Source Files\Mod\Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\MainMenuStatus.h">
       <Filter>Source Files\Mod\Headers</Filter>
     </ClInclude>
     <ClInclude Include="CppSDK\SDK\Basic.hpp">

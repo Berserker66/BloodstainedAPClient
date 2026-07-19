@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 
+#include "ClientVersion.h"
 #include "GameManager.h"
 #include "HookManager.h"
 #include "Logger.h"
@@ -26,7 +27,9 @@ double deathtime = -1;
 bool awaiting_password = false;
 
 const std::string GAME_NAME = "Bloodstained: Ritual of the Night";
-const APClient::Version CLIENT_VERSION = {0, 6, 5};
+const APClient::Version CLIENT_VERSION = {ClientVersion::ArchipelagoProtocol::Major,
+                                          ClientVersion::ArchipelagoProtocol::Minor,
+                                          ClientVersion::ArchipelagoProtocol::Build};
 std::string game_seed;
 const int MAX_SEED_LENGTH = 32;
 
