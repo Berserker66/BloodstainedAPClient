@@ -7,6 +7,7 @@
 #include <ProjectBlood_structs.hpp>
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -213,7 +214,13 @@ size_t Archipelago::SendMissingClearedLocations() {
     if (locations.empty()) return 0;
     Logger::Log(LogLevel::File, "[AP] Submitting missing cleared locations:", locationNames, "resolved IDs:",
                 locations.size());
-    ap->LocationChecks(std::list<int64_t>(locations.begin(), locations.end()));
+    try {
+        ap->LocationChecks(std::list<int64_t>(locations.begin(), locations.end()));
+    } catch (const std::exception& exception) {
+        Logger::Log(LogLevel::File, "[AP] Location-check send failed; checks remain journaled for reconnect:",
+                    exception.what());
+        return 0;
+    }
     Logger::Log("[AP] Reconciled ", locations.size(), " missing location checks");
     return locations.size();
 }
