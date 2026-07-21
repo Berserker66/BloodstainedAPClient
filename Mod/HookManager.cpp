@@ -172,6 +172,8 @@ const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     {"AP_Shortcut_Shard", "Shortcut"},
     {"AP_Deepsinker_Shard", "Deepsinker"},
     {"AP_FamiliaSilverKnight_Shard", "FamiliaSilverKnight"},
+    {"AP_Aquastream_Shard", "Aquastream"},
+    {"AP_FamiliaIgniculus_Shard", "FamiliaIgniculus"},
     {"AP_FamiliaArcher_Shard", "FamiliaArcher"},
 };
 
