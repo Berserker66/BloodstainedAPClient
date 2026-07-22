@@ -20,6 +20,7 @@
 #include "InGameTracker.h"
 #include "Logger.h"
 #include "ThreadQueue.h"
+#include "TrackerData.generated.h"
 #include "Utils.h"
 #include "apclient.hpp"
 #include "apuuid.hpp"
@@ -416,10 +417,15 @@ void Archipelago::ProcessReceivedItems() {
     while (!pendingReceivedItems_.empty() && pendingReceivedItems_.begin()->first <= lastReceivedItemIndex_) {
         pendingReceivedItems_.erase(pendingReceivedItems_.begin());
     }
-    if (pendingReceivedItems_.empty()) {
-        ReconcileReceivedProgressionInventory();
+
+    // Repair acknowledged progression before newer deliveries. Otherwise one
+    // unresolved later item can indefinitely starve recovery of a required item
+    // such as Zangetsuto that an older client already committed as received.
+    ReconcileReceivedProgressionInventory();
+    if (receivedItemGrantPending_ || !receivedProgressionInventoryReconciled_) {
         return;
     }
+    if (pendingReceivedItems_.empty()) return;
 
     const auto& item = pendingReceivedItems_.begin()->second;
     const int64_t itemIndex = item.index;
@@ -519,7 +525,12 @@ void Archipelago::ReconcileReceivedProgressionInventory() {
         if (!itemId) continue;
 
         const bool isShardOrSkill = IsShardOrSkillItem(*itemId);
-        const bool isProgression = (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
+        const bool isNativeTraversal = std::any_of(
+            bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.begin(),
+            bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.end(),
+            [&itemName](const auto& traversalItem) { return traversalItem.item_name == itemName; });
+        const bool isProgression = isNativeTraversal ||
+                                   (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
         if ((!isShardOrSkill && !isProgression) || GameManager::Instance().CheckAllInventories(*itemId)) {
             continue;
         }
@@ -716,9 +727,22 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
         for (const auto& item : items) {
             pendingReceivedItems_.insert_or_assign(item.index, item);
             receivedItems_.insert_or_assign(item.index, item);
-            progressionChanged |= (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
+            const std::string itemName = ap->get_item_name(item.item, ap->get_game());
+            const bool isNativeTraversal = std::any_of(
+                bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.begin(),
+                bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.end(),
+                [&itemName](const auto& traversalItem) { return traversalItem.item_name == itemName; });
+            const bool isProgression = isNativeTraversal ||
+                                       (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
+            progressionChanged |= isProgression;
         }
-        if (progressionChanged) InGameTracker::Instance().InvalidateReachability("AP progression item received");
+        if (progressionChanged) {
+            // ReceivedItems can be delivered in multiple batches. A previous
+            // batch may have completed reconciliation before this progression
+            // item arrived, so every such batch must reopen the repair scan.
+            receivedProgressionInventoryReconciled_ = false;
+            InGameTracker::Instance().InvalidateReachability("AP progression item received");
+        }
         InGameTracker::Instance().MarkInventorySynchronized();
         ProcessReceivedItems();
     });

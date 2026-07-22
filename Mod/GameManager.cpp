@@ -67,6 +67,16 @@ bool GameManager::PopulateDisplayToItemIdTable() {
         std::string displayName = itemData.Name.ToString();
         DisplayNameToItemId[displayName] = itemId;
     }
+
+    // The crossover catalog also contains COL_Zangetsuto. Both rows can resolve
+    // to the same display name, while Archipelago progression specifically uses
+    // the story weapon whose native ID is Swordsman. RowMap iteration order must
+    // not decide which one received items grant or reconciliation inspects.
+    // Canonical Archipelago names come from data/translation/Item.json and can
+    // differ from the active runtime localization. Keep required disambiguation
+    // and known non-localized names deterministic here.
+    DisplayNameToItemId["Carnot's Rebuke"] = "SteamFlatWideEnd";
+    DisplayNameToItemId["Zangetsuto"] = "Swordsman";
     return true;
 }
 
@@ -297,6 +307,7 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
         inventory->GetItemDataById(itemName, &itemData);
 
         auto itemInInventory = gameManager.CheckAllInventories(name);
+        const int previousCount = itemInInventory ? itemInInventory->Num : 0;
         if (itemInInventory.has_value()) {
             Logger::Log("Player has", itemInInventory->Num, "of", name);
             if (itemInInventory->Num >= itemInInventory->MaxNum) {
@@ -307,8 +318,17 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
             }
         }
 
-        const bool granted = inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
-        if (completion) completion(granted ? ItemGrantResult::Granted : ItemGrantResult::Rejected);
+        const bool nativeGrantAccepted = inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
+        const auto itemAfterGrant = gameManager.CheckAllInventories(name);
+        const bool inventoryUpdated = itemAfterGrant && itemAfterGrant->Num > previousCount;
+        if (nativeGrantAccepted && !inventoryUpdated) {
+            Logger::Log(LogLevel::File, "[AP] Native item grant reported success without updating inventory:",
+                        name, "previous count:", previousCount,
+                        "current count:", itemAfterGrant ? itemAfterGrant->Num : 0);
+        }
+        if (completion) {
+            completion(nativeGrantAccepted && inventoryUpdated ? ItemGrantResult::Granted : ItemGrantResult::Rejected);
+        }
     });
 }
 
