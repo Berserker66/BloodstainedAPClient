@@ -158,6 +158,9 @@
     <ClCompile Include="Mod\Utils.cpp">
       <Filter>Source Files\Mod\Sources</Filter>
     </ClCompile>
+    <ClCompile Include="Mod\QualityOfLife.cpp">
+      <Filter>Source Files\Mod\Sources</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="version\version.h">
@@ -267,6 +270,12 @@
     </ClInclude>
     <ClInclude Include="Mod\APBridge.h" />
     <ClInclude Include="Mod\Utils.h">
+      <Filter>Source Files\Mod\Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\QualityOfLife.h">
+      <Filter>Source Files\Mod\Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="Mod\QualityOfLifeLogic.h">
       <Filter>Source Files\Mod\Headers</Filter>
     </ClInclude>
   </ItemGroup>

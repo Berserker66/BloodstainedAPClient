@@ -21,6 +21,7 @@
 #include "MainMenuStatus.h"
 #include "Mod/Archipelago.h"
 #include "ProjectBlood_classes.hpp"
+#include "QualityOfLife.h"
 #include "SDK.hpp"
 #include "Utils.h"
 
@@ -373,6 +374,7 @@ bool HookManager::Init() {
         MainMenuStatus::Instance().Forget();
         GameManager::Instance().PlayerAlive();
         InGameTracker::Instance().LoadDisplayMode();
+        QualityOfLife::Instance().LoadSettings();
         InGameTracker::Instance().InvalidateReachability("save loaded");
         Archipelago::Instance().ResetLocalLocationCache();
         Gui::Instance().TryAutoConnect();
@@ -528,6 +530,7 @@ bool HookManager::PostInit() {
 
 void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, void* params) {
     if (!obj || !func) return;
+    QualityOfLife::Instance().ProcessEventBefore(obj, func, params);
     std::string functionName = func->Name.GetRawString();
 
     if (functionName == "QuitGame" || functionName == "QuitGameYes") {

@@ -196,6 +196,7 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     <ClCompile Include="Mod\Logger.cpp" />
     <ClCompile Include="Mod\MainMenuStatus.cpp" />
     <ClCompile Include="Mod\ModRunner.cpp" />
+    <ClCompile Include="Mod\QualityOfLife.cpp" />
     <ClCompile Include="Mod\ToggleMods.cpp" />
     <ClCompile Include="Mod\Tracker.cpp" />
     <ClCompile Include="Mod\TrackerRuleEvaluator.cpp" />
@@ -237,6 +238,8 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     <ClInclude Include="Mod\Resource.h" />
     <ClInclude Include="Mod\ModRunner.h" />
     <ClInclude Include="Mod\NotifyObject.h" />
+    <ClInclude Include="Mod\QualityOfLife.h" />
+    <ClInclude Include="Mod\QualityOfLifeLogic.h" />
     <ClInclude Include="Mod\ToggleMods.h" />
     <ClInclude Include="Mod\Tracker.h" />
     <ClInclude Include="Mod\InGameTracker.h" />

@@ -16,6 +16,7 @@
 #include "Logger.h"
 #include "PBBronzeTreasureBox_BP_classes.hpp"
 #include "ProjectBlood_classes.hpp"
+#include "QualityOfLife.h"
 #include "Resource.h"
 #include "ThreadQueue.h"
 #include "ToggleMods.h"
@@ -241,6 +242,23 @@ static void RenderArchipelagoPanel() {
         ImGui::EndCombo();
     }
 
+}
+
+static void RenderQualityOfLifePanel() {
+    ImGui::SeparatorText("Quality of Life");
+
+    const bool saveLoaded = GameManager::Instance().IsPlayerLoadedInGame();
+    bool autoSellWastedShards = QualityOfLife::Instance().IsAutoSellWastedShardsEnabled();
+    ImGui::BeginDisabled(!saveLoaded);
+    if (ImGui::Checkbox("Auto-sell wasted shards", &autoSellWastedShards)) {
+        ThreadQueue::Instance().Enqueue([autoSellWastedShards] {
+            QualityOfLife::Instance().SetAutoSellWastedShardsEnabled(autoSellWastedShards);
+        });
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Automatically sell incoming shards that would exceed grade 9.");
+
+    if (!saveLoaded) ImGui::TextDisabled("Load a save to change this setting.");
 }
 
 static void RenderDebugInfoPanel() {
@@ -519,6 +537,10 @@ void Gui::Render() {
             if (ImGui::BeginTabBar("MainTabs")) {
                 if (ImGui::BeginTabItem("Archipelago")) {
                     RenderArchipelagoPanel();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Quality of Life")) {
+                    RenderQualityOfLifePanel();
                     ImGui::EndTabItem();
                 }
 #ifdef _DEBUG

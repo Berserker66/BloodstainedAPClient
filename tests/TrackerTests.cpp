@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "QualityOfLifeLogic.h"
 #include "Tracker.h"
 #include "TrackerRuleEvaluator.h"
 
@@ -62,6 +63,17 @@ void TestRuleEvaluator() {
     Check(evaluator.Evaluate(6, full_inventory), "COUNT sums item copies");
     Check(!evaluator.Evaluate(7, partial_inventory), "COUNT_UNIQUE rejects one item type");
     Check(evaluator.Evaluate(7, full_inventory), "COUNT_UNIQUE counts item types");
+}
+
+void TestExcessShardQuantity() {
+    using bloodstained::qol::ExcessShardQuantity;
+
+    Check(ExcessShardQuantity(8, 1) == 0, "grade 8 to 9 is not wasted");
+    Check(ExcessShardQuantity(9, 1) == 1, "a shard received at grade 9 is wasted");
+    Check(ExcessShardQuantity(8, 2) == 1, "only the copy above grade 9 is wasted");
+    Check(ExcessShardQuantity(9, 3) == 3, "all copies received at grade 9 are wasted");
+    Check(ExcessShardQuantity(9, 0) == 0, "zero incoming shards are ignored");
+    Check(ExcessShardQuantity(9, -1) == 0, "negative incoming quantities are ignored");
 }
 
 constexpr std::array<std::string_view, 90> CHECKED_SNAPSHOT = {{
@@ -201,6 +213,7 @@ void TestGalleonOpeningHeightGate() {
 
 int main() {
     TestRuleEvaluator();
+    TestExcessShardQuantity();
     TestRealSnapshot();
     TestGeneratedMapData();
     TestGalleonOpeningHeightGate();
