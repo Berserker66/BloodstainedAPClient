@@ -146,8 +146,25 @@ void TestGeneratedMapData() {
         Check(start_room->x == 2 && start_room->z == 0, "start room uses integer minimap coordinates");
         Check(start_room->width == 2 && start_room->height == 1, "start room has the expected dimensions");
         Check(!start_room->out_of_map, "start room is on the main map");
+        Check(Tracker::IsRoomCellVisible(*start_room, 1), "ordinary room cell is visible");
+    }
+    const auto* waterway_room = Tracker::FindRoom("m11UGD_013");
+    Check(waterway_room != nullptr, "non-rectangular Waterway room has minimap geometry");
+    if (waterway_room != nullptr) {
+        Check(!Tracker::IsRoomCellVisible(*waterway_room, 1), "native-hidden Waterway cell is trimmed");
+        Check(Tracker::IsRoomCellVisible(*waterway_room, 4), "visible Waterway cell remains rendered");
     }
     Check(Tracker::FindRoom("not_a_room") == nullptr, "unknown room lookup fails cleanly");
+    Check(Tracker::IsTraversalItem("Double Jump"), "generated traversal item is recognized");
+    Check(Tracker::IsTraversalItem("Doublejump"), "native traversal shard ID is recognized");
+    Check(Tracker::IsTraversalItem("Demoniccapture"), "native progression shard ID is recognized");
+    Check(!Tracker::IsTraversalItem("Nothing"), "non-progression item is not traversal-relevant");
+
+    Tracker tracker;
+    tracker.SetInventory({});
+    const auto reachable_rooms = tracker.GetReachableRooms(Difficulty::NORMAL);
+    Check(std::ranges::any_of(reachable_rooms, [](const auto* room) { return room->name == "m01SIP_000"; }),
+          "reachable-room projection contains the starting room");
 
     const auto wall = std::find_if(
         bloodstained::tracker::generated::LOCATIONS.begin(), bloodstained::tracker::generated::LOCATIONS.end(),
@@ -156,6 +173,10 @@ void TestGeneratedMapData() {
     if (wall != bloodstained::tracker::generated::LOCATIONS.end()) {
         Check(wall->type == bloodstained::tracker::generated::LocationType::WALL,
               "wall checks are exported separately from chests");
+        Check(wall->map_x > 0.04f && wall->map_x < 0.05f,
+              "wall checks carry their room-local horizontal map position");
+        Check(wall->map_z > 1.66f && wall->map_z < 1.67f,
+              "wall checks carry their room-local vertical map position");
     }
 }
 

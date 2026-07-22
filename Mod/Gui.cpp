@@ -3,14 +3,20 @@
 
 #include <PB_Chr_PlayerRoot_classes.hpp>
 #include <Step_P0000_classes.hpp>
+#include <algorithm>
+#include <cmath>
 #include <iterator>
+#include <vector>
+#include <wincodec.h>
 
 #include "APBridge.h"
 #include "Archipelago.h"
 #include "GameManager.h"
+#include "InGameTracker.h"
 #include "Logger.h"
 #include "PBBronzeTreasureBox_BP_classes.hpp"
 #include "ProjectBlood_classes.hpp"
+#include "Resource.h"
 #include "ThreadQueue.h"
 #include "ToggleMods.h"
 #include "Utils.h"
@@ -18,8 +24,86 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#pragma comment(lib, "windowscodecs.lib")
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
 long(__stdcall* Gui::originalPresent)(IDXGISwapChain*, unsigned int, unsigned int) = nullptr;
 bool Gui::g_Hooked = false;
+
+static ID3D11ShaderResourceView* s_WallMarkerTexture = nullptr;
+
+static ID3D11ShaderResourceView* LoadEmbeddedPngTexture(ID3D11Device* device, int resourceId) {
+    if (!device) return nullptr;
+    const HMODULE module = reinterpret_cast<HMODULE>(&__ImageBase);
+    const HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
+    if (!resource) return nullptr;
+    const HGLOBAL loadedResource = LoadResource(module, resource);
+    const DWORD byteCount = SizeofResource(module, resource);
+    auto* bytes = static_cast<BYTE*>(LockResource(loadedResource));
+    if (!loadedResource || !bytes || byteCount == 0) return nullptr;
+
+    IWICImagingFactory* factory = nullptr;
+    HRESULT result = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_PPV_ARGS(&factory));
+    if (result == CO_E_NOTINITIALIZED) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        result = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&factory));
+    }
+    if (FAILED(result) || !factory) return nullptr;
+
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11ShaderResourceView* textureView = nullptr;
+
+    result = factory->CreateStream(&stream);
+    if (SUCCEEDED(result)) result = stream->InitializeFromMemory(bytes, byteCount);
+    if (SUCCEEDED(result)) {
+        result = factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
+    }
+    if (SUCCEEDED(result)) result = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(result)) result = factory->CreateFormatConverter(&converter);
+    if (SUCCEEDED(result)) {
+        result = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr,
+                                       0.0, WICBitmapPaletteTypeCustom);
+    }
+
+    UINT width = 0;
+    UINT height = 0;
+    if (SUCCEEDED(result)) result = converter->GetSize(&width, &height);
+    std::vector<BYTE> pixels;
+    if (SUCCEEDED(result) && width > 0 && height > 0) {
+        const UINT stride = width * 4;
+        pixels.resize(static_cast<std::size_t>(stride) * height);
+        result = converter->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data());
+        if (SUCCEEDED(result)) {
+            D3D11_TEXTURE2D_DESC description{};
+            description.Width = width;
+            description.Height = height;
+            description.MipLevels = 1;
+            description.ArraySize = 1;
+            description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            description.SampleDesc.Count = 1;
+            description.Usage = D3D11_USAGE_IMMUTABLE;
+            description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            const D3D11_SUBRESOURCE_DATA imageData{pixels.data(), stride, 0};
+            result = device->CreateTexture2D(&description, &imageData, &texture);
+        }
+        if (SUCCEEDED(result)) result = device->CreateShaderResourceView(texture, nullptr, &textureView);
+    }
+
+    if (texture) texture->Release();
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (stream) stream->Release();
+    factory->Release();
+    return SUCCEEDED(result) ? textureView : nullptr;
+}
 
 static UnlimitedStrengthMod unlimitedStrengthMod;
 static UnlimitedLuckMod unlimitedLuckMod;
@@ -136,6 +220,25 @@ static void RenderArchipelagoPanel() {
             Logger::Log("Disconnecting from Archipelago");
             APBridge::Instance().EnqueueDisconnect();
         }
+    }
+
+    constexpr const char* TRACKER_MODE_NAMES[] = {"None", "Main Map", "Mini Map", "Full"};
+    const auto trackerMode = InGameTracker::Instance().GetDisplayMode();
+    const int trackerModeIndex = static_cast<int>(trackerMode);
+    ImGui::Text("In-game tracking");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(160);
+    if (ImGui::BeginCombo("##In-game tracking", TRACKER_MODE_NAMES[trackerModeIndex])) {
+        for (int modeIndex = 0; modeIndex < IM_ARRAYSIZE(TRACKER_MODE_NAMES); ++modeIndex) {
+            const bool selected = trackerModeIndex == modeIndex;
+            if (ImGui::Selectable(TRACKER_MODE_NAMES[modeIndex], selected)) {
+                const auto selectedMode = static_cast<TrackerDisplayMode>(modeIndex);
+                ThreadQueue::Instance().Enqueue(
+                    [selectedMode] { InGameTracker::Instance().SetDisplayMode(selectedMode); });
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
     }
 
 }
@@ -294,6 +397,10 @@ bool Gui::InitImGui(IDXGISwapChain* swapChain) {
 
     ImGui_ImplWin32_Init(m_GameWindow);
     ImGui_ImplDX11_Init(m_Device, m_DeviceContext);
+    s_WallMarkerTexture = LoadEmbeddedPngTexture(m_Device, IDR_WALL_MARKER_PNG);
+    if (!s_WallMarkerTexture) {
+        Logger::Log(LogLevel::Warning, "[Tracker] Failed to create the DX11 breakable-wall marker texture");
+    }
 
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (SUCCEEDED(swapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
@@ -306,6 +413,82 @@ bool Gui::InitImGui(IDXGISwapChain* swapChain) {
     return true;
 }
 
+static bool IsFreshMiniMapOverlay(const MiniMapOverlaySnapshot& snapshot) {
+    if (!snapshot.visible || snapshot.clipRight <= snapshot.clipLeft || snapshot.clipBottom <= snapshot.clipTop) {
+        return false;
+    }
+    const std::uint64_t now = GetTickCount64();
+    return now >= snapshot.updatedAtMilliseconds && now - snapshot.updatedAtMilliseconds <= 150;
+}
+
+static void RenderMiniMapOverlay(const MiniMapOverlaySnapshot& snapshot) {
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+    if (!drawList) return;
+
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const ImVec2 clipMin{std::clamp(snapshot.clipLeft, 0.0f, displaySize.x),
+                         std::clamp(snapshot.clipTop, 0.0f, displaySize.y)};
+    const ImVec2 clipMax{std::clamp(snapshot.clipRight, 0.0f, displaySize.x),
+                         std::clamp(snapshot.clipBottom, 0.0f, displaySize.y)};
+    if (clipMax.x <= clipMin.x || clipMax.y <= clipMin.y) return;
+
+    drawList->PushClipRect(clipMin, clipMax, true);
+    for (const auto& marker : snapshot.markers) {
+        if (!std::isfinite(marker.centerX) || !std::isfinite(marker.centerY) || marker.width <= 0.0f ||
+            marker.height <= 0.0f) {
+            continue;
+        }
+
+        const float centerX = marker.centerX;
+        const float centerY = marker.centerY;
+        const bool centerInside = centerX >= clipMin.x && centerX <= clipMax.x && centerY >= clipMin.y &&
+                                  centerY <= clipMax.y;
+        if (!centerInside) continue;
+
+        const float width = std::clamp(marker.width, 8.0f, 96.0f);
+        const float height = std::clamp(marker.height, 8.0f, 96.0f);
+        const float left = centerX - width * 0.5f;
+        const float top = centerY - height * 0.5f;
+        const float right = centerX + width * 0.5f;
+        const float bottom = centerY + height * 0.5f;
+        if (marker.kind == MiniMapOverlayMarkerKind::WALL && s_WallMarkerTexture) {
+            drawList->AddImage(ImTextureID(reinterpret_cast<intptr_t>(s_WallMarkerTexture)), ImVec2(left, top),
+                               ImVec2(right, bottom));
+            continue;
+        }
+
+        if (marker.kind == MiniMapOverlayMarkerKind::WALL) {
+            // Resource-load fallback: retain the wall's nine-block silhouette instead of reverting to a chest.
+            const float gap = std::max(1.0f, width * 0.04f);
+            const float blockWidth = (width - gap * 2.0f) / 3.0f;
+            const float blockHeight = (height - gap * 2.0f) / 3.0f;
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    const float x = left + column * (blockWidth + gap);
+                    const float y = top + row * (blockHeight + gap);
+                    drawList->AddRectFilled(ImVec2(x, y), ImVec2(x + blockWidth, y + blockHeight),
+                                            IM_COL32(35, 235, 55, 255), 1.0f);
+                    drawList->AddRect(ImVec2(x, y), ImVec2(x + blockWidth, y + blockHeight),
+                                      IM_COL32(5, 55, 12, 255), 1.0f, 0, 1.0f);
+                }
+            }
+            continue;
+        }
+
+        // The main-map shard brush is backed by an Unreal-owned dynamic item texture. Represent the same target
+        // distinctly in the external overlay without sharing that unsafe resource across renderers.
+        const ImVec2 topPoint{centerX, top};
+        const ImVec2 rightPoint{right, centerY};
+        const ImVec2 bottomPoint{centerX, bottom};
+        const ImVec2 leftPoint{left, centerY};
+        drawList->AddQuadFilled(topPoint, rightPoint, bottomPoint, leftPoint, IM_COL32(235, 55, 255, 255));
+        drawList->AddTriangleFilled(topPoint, rightPoint, ImVec2(centerX, centerY),
+                                    IM_COL32(255, 155, 255, 255));
+        drawList->AddQuad(topPoint, rightPoint, bottomPoint, leftPoint, IM_COL32(70, 5, 85, 255), 2.0f);
+    }
+    drawList->PopClipRect();
+}
+
 void Gui::Render() {
     if (m_IsResizing) return;
 
@@ -314,29 +497,32 @@ void Gui::Render() {
         m_Open = !m_Open;
     }
 
-    if (!m_Open) {
-        return;
-    }
-
     if (!m_ImGuiInit || !m_Device || !m_DeviceContext) {
         return;
     }
+
+    const MiniMapOverlaySnapshot miniMapOverlay = InGameTracker::Instance().GetMiniMapOverlaySnapshot();
+    const bool renderMiniMapOverlay = IsFreshMiniMapOverlay(miniMapOverlay);
+    if (!m_Open && !renderMiniMapOverlay) return;
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::SetNextWindowSizeConstraints(ImVec2(325.0f, 134.0f), ImVec2(FLT_MAX, FLT_MAX));
-    bool menuOpened = ImGui::Begin("Mod Menu", &m_Open, ImGuiWindowFlags_AlwaysAutoResize);
+    if (renderMiniMapOverlay) RenderMiniMapOverlay(miniMapOverlay);
 
-    if (menuOpened) {
-        if (ImGui::BeginTabBar("MainTabs")) {
-            if (ImGui::BeginTabItem("Archipelago")) {
-                RenderArchipelagoPanel();
-                ImGui::EndTabItem();
-            }
+    if (m_Open) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(325.0f, 134.0f), ImVec2(FLT_MAX, FLT_MAX));
+        bool menuOpened = ImGui::Begin("Mod Menu", &m_Open, ImGuiWindowFlags_AlwaysAutoResize);
+
+        if (menuOpened) {
+            if (ImGui::BeginTabBar("MainTabs")) {
+                if (ImGui::BeginTabItem("Archipelago")) {
+                    RenderArchipelagoPanel();
+                    ImGui::EndTabItem();
+                }
 #ifdef _DEBUG
-            if (ImGui::BeginTabItem("Mods")) {
+                if (ImGui::BeginTabItem("Mods")) {
                 // Test toggle button
                 if (GameManager::Instance().IsPlayerLoadedInGame()) {
                     unlimitedStrengthMod.Init("Unlimited Strength");
@@ -363,17 +549,18 @@ void Gui::Render() {
                     }
                 }
                 ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("DebugInfo")) {
-                RenderDebugInfoPanel();
-                ImGui::EndTabItem();
-            }
+                }
+                if (ImGui::BeginTabItem("DebugInfo")) {
+                    RenderDebugInfoPanel();
+                    ImGui::EndTabItem();
+                }
 #endif
+            }
+            ImGui::EndTabBar();
         }
-        ImGui::EndTabBar();
-    }
 
-    ImGui::End();
+        ImGui::End();
+    }
 
     ImGui::EndFrame();
 
@@ -386,6 +573,10 @@ void Gui::Render() {
 }
 
 void Gui::Shutdown() {
+    if (s_WallMarkerTexture) {
+        s_WallMarkerTexture->Release();
+        s_WallMarkerTexture = nullptr;
+    }
     if (m_ImGuiInit) {
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();

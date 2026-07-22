@@ -12,10 +12,12 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <utility>
 
 #include "ClientVersion.h"
 #include "GameManager.h"
 #include "HookManager.h"
+#include "InGameTracker.h"
 #include "Logger.h"
 #include "ThreadQueue.h"
 #include "Utils.h"
@@ -40,6 +42,8 @@ const std::string CLEARED_LOCATION_SAVE_PREFIX = "AP_ClearedLocation_";
 const int32_t CONNECTION_SAVE_VERSION = 1;
 const size_t MAX_CONNECTION_FIELD_LENGTH = 1024;
 const int32_t MAX_CLEARED_LOCATIONS = 4096;
+const std::chrono::milliseconds ITEM_GRANT_INTERVAL(100);
+const std::chrono::milliseconds ITEM_GRANT_RETRY_DELAY(500);
 
 #define UUID_FILE "uuid"
 #define CERT_STORE "cacert.pem"
@@ -48,6 +52,14 @@ using json = nlohmann::json;
 
 static std::optional<int32_t> LoadSavedValue(const std::string& saveValueName);
 static std::optional<std::string> LoadSavedString(const std::string& saveValueName);
+
+static bool IsShardOrSkillItem(const std::string& itemId) {
+    return GameManager::Instance().ItemHasItemCategories(
+        itemId, {SDK::ECarriedCatalog::AllShard, SDK::ECarriedCatalog::TriggerShard,
+                 SDK::ECarriedCatalog::DirectionalShard, SDK::ECarriedCatalog::EffectiveShard,
+                 SDK::ECarriedCatalog::EnchantShard, SDK::ECarriedCatalog::FamiliarShard,
+                 SDK::ECarriedCatalog::Skill});
+}
 
 Archipelago& Archipelago::Instance() {
     static Archipelago instance;
@@ -123,6 +135,15 @@ bool Archipelago::IsMissingLocation(const std::string& locationName, std::uint64
            ap->get_missing_locations().contains(locationId);
 }
 
+bool Archipelago::WasLocationClearedLocally(const std::string& locationName) {
+    LoadClearedLocations();
+    const std::string localName = "AP_" + locationName;
+    return std::ranges::any_of(clearedLocations_, [&localName](const std::string& clearedLocation) {
+        return clearedLocation == localName || clearedLocation.starts_with(localName + ".") ||
+               localName.starts_with(clearedLocation + ".");
+    });
+}
+
 struct LocationResolution {
     bool exists = false;
     std::set<int64_t> missing;
@@ -191,6 +212,7 @@ void Archipelago::RecordClearedLocation(const std::string& locationId) {
     SaveLocalString(CLEARED_LOCATION_SAVE_PREFIX + std::to_string(index), locationId);
     SaveLocalValue(CLEARED_LOCATION_SAVE_PREFIX + "Count", static_cast<int32_t>(index + 1));
     clearedLocations_.push_back(locationId);
+    InGameTracker::Instance().ObserveLocationCleared(locationId);
     Logger::Log(LogLevel::File, "[AP] Journaled cleared location:", locationId, "index:", index);
 }
 
@@ -365,14 +387,20 @@ void Archipelago::LoadLocalProgress() {
     lastReceivedItemIndex_ = itemIndex;
     lastQueuedItemIndex_ = lastReceivedItemIndex_;
     localProgressLoaded_ = !legacyReceivedItemIndex_.has_value();
-    receivedShardsReconciled_ = false;
+    receivedItemGrantPending_ = false;
+    receivedItemRetryAt_ = {};
+    receivedItemGeneration_++;
+    receivedProgressionInventoryReconciled_ = false;
     if (localProgressLoaded_) {
         Logger::Log("[AP] Loaded local item index:", lastReceivedItemIndex_, "prefix:", localSavePrefix_);
     }
 }
 
 void Archipelago::ProcessReceivedItems() {
-    if (processingReceivedItems_) return;
+    if (processingReceivedItems_ || receivedItemGrantPending_ ||
+        std::chrono::steady_clock::now() < receivedItemRetryAt_) {
+        return;
+    }
     processingReceivedItems_ = true;
     struct ProcessingGuard {
         bool& active;
@@ -385,33 +413,68 @@ void Archipelago::ProcessReceivedItems() {
     TryMigrateLegacyProgress();
     if (!localProgressLoaded_) return;
 
-    for (auto itemIt = pendingReceivedItems_.begin(); itemIt != pendingReceivedItems_.end();) {
-        const auto& item = itemIt->second;
-        if (item.index <= lastQueuedItemIndex_) {
-            itemIt = pendingReceivedItems_.erase(itemIt);
-            continue;
-        }
-
-        Logger::Log("[AP] Item - player:", item.player, " location:", item.location, " item:", item.item,
-                    " index:", item.index, " local index:", lastReceivedItemIndex_);
-        std::string itemId = ap->get_item_name(item.item, ap->get_game());
-        if (!GivePlayerItem(itemId, false)) {
-            Logger::Log(LogLevel::Warning, "[AP] Delaying unknown received item:", itemId, "index:", item.index);
-            break;
-        }
-
-        int64_t itemIndex = item.index;
-        std::string savePrefix = localSavePrefix_;
-        std::string saveValueName = savePrefix + ITEM_INDEX_SAVE_VALUE;
-        ThreadQueue::Instance().Enqueue([this, itemIndex, savePrefix, saveValueName]() {
-            SaveLocalValue(saveValueName, static_cast<int32_t>(itemIndex));
-            if (localSavePrefix_ == savePrefix) lastReceivedItemIndex_ = itemIndex;
-        });
-        lastQueuedItemIndex_ = item.index;
-        itemIt = pendingReceivedItems_.erase(itemIt);
+    while (!pendingReceivedItems_.empty() && pendingReceivedItems_.begin()->first <= lastReceivedItemIndex_) {
+        pendingReceivedItems_.erase(pendingReceivedItems_.begin());
+    }
+    if (pendingReceivedItems_.empty()) {
+        ReconcileReceivedProgressionInventory();
+        return;
     }
 
-    ReconcileReceivedShards();
+    const auto& item = pendingReceivedItems_.begin()->second;
+    const int64_t itemIndex = item.index;
+    const std::string itemName = ap->get_item_name(item.item, ap->get_game());
+    const std::string savePrefix = localSavePrefix_;
+    const uint64_t generation = receivedItemGeneration_;
+    Logger::Log(LogLevel::File, "[AP] Attempting received item grant:", itemName, "index:", itemIndex,
+                "committed index:", lastReceivedItemIndex_);
+
+    receivedItemGrantPending_ = true;
+    lastQueuedItemIndex_ = itemIndex;
+    if (!GivePlayerItem(itemName, false,
+                        [this, itemIndex, itemName, savePrefix, generation](ItemGrantResult result) {
+                            CompleteReceivedItem(itemIndex, itemName, savePrefix, generation, result);
+                        })) {
+        receivedItemGrantPending_ = false;
+        lastQueuedItemIndex_ = lastReceivedItemIndex_;
+        receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_RETRY_DELAY;
+        Logger::Log(LogLevel::File, "[AP] Delaying unresolved received item:", itemName, "index:", itemIndex);
+    }
+}
+
+void Archipelago::CompleteReceivedItem(int64_t itemIndex, const std::string& itemName,
+                                       const std::string& savePrefix, uint64_t generation, ItemGrantResult result) {
+    if (generation != receivedItemGeneration_) {
+        Logger::Log(LogLevel::File, "[AP] Ignoring stale received item result:", itemName, "index:", itemIndex);
+        return;
+    }
+
+    receivedItemGrantPending_ = false;
+    lastQueuedItemIndex_ = lastReceivedItemIndex_;
+    if (localSavePrefix_ != savePrefix) {
+        Logger::Log(LogLevel::File, "[AP] Discarding received item result after save or slot change:", itemName,
+                    "index:", itemIndex);
+        return;
+    }
+
+    if (result == ItemGrantResult::Rejected) {
+        receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_RETRY_DELAY;
+        Logger::Log(LogLevel::File, "[AP] Native item grant rejected; retaining for retry:", itemName,
+                    "index:", itemIndex);
+        return;
+    }
+
+    SaveLocalValue(savePrefix + ITEM_INDEX_SAVE_VALUE, static_cast<int32_t>(itemIndex));
+    lastReceivedItemIndex_ = itemIndex;
+    lastQueuedItemIndex_ = itemIndex;
+    pendingReceivedItems_.erase(itemIndex);
+    receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_INTERVAL;
+    if (result == ItemGrantResult::AtCapacity) {
+        Logger::Log(LogLevel::File, "[AP] Received item already at native inventory capacity:", itemName,
+                    "committed index:", itemIndex);
+    } else {
+        Logger::Log(LogLevel::File, "[AP] Received item grant succeeded:", itemName, "committed index:", itemIndex);
+    }
 }
 
 void Archipelago::TryMigrateLegacyProgress() {
@@ -425,10 +488,7 @@ void Archipelago::TryMigrateLegacyProgress() {
         const auto itemId = GameManager::Instance().GetIdFromDisplayName(itemName);
         if (itemId && GameManager::Instance().CheckAllInventories(*itemId)) {
             matchingItemIds.insert(*itemId);
-            const bool isShard = GameManager::Instance().ItemHasItemCategories(
-                *itemId, {SDK::ECarriedCatalog::AllShard, SDK::ECarriedCatalog::TriggerShard,
-                          SDK::ECarriedCatalog::DirectionalShard, SDK::ECarriedCatalog::EffectiveShard,
-                          SDK::ECarriedCatalog::EnchantShard, SDK::ECarriedCatalog::FamiliarShard});
+            const bool isShard = IsShardOrSkillItem(*itemId);
             if (isShard || matchingItemIds.size() >= 3) {
                 hasPreviouslyReceivedInventory = true;
                 break;
@@ -445,29 +505,48 @@ void Archipelago::TryMigrateLegacyProgress() {
     localProgressLoaded_ = true;
 }
 
-void Archipelago::ReconcileReceivedShards() {
-    if (receivedShardsReconciled_ || receivedItems_.empty() || !GameManager::Instance().CanReceiveItems()) return;
+void Archipelago::ReconcileReceivedProgressionInventory() {
+    if (receivedProgressionInventoryReconciled_ || receivedItems_.empty() ||
+        !GameManager::Instance().CanReceiveItems()) {
+        return;
+    }
 
-    std::unordered_set<std::string> repairedShardIds;
     for (const auto& [index, item] : receivedItems_) {
         if (index > lastReceivedItemIndex_) continue;
 
         std::string itemName = ap->get_item_name(item.item, ap->get_game());
         const auto itemId = GameManager::Instance().GetIdFromDisplayName(itemName);
-        if (!itemId || repairedShardIds.contains(*itemId) ||
-            !GameManager::Instance().ItemHasItemCategories(
-                *itemId, {SDK::ECarriedCatalog::AllShard, SDK::ECarriedCatalog::TriggerShard,
-                          SDK::ECarriedCatalog::DirectionalShard, SDK::ECarriedCatalog::EffectiveShard,
-                          SDK::ECarriedCatalog::EnchantShard, SDK::ECarriedCatalog::FamiliarShard}) ||
-            GameManager::Instance().CheckAllInventories(*itemId)) {
+        if (!itemId) continue;
+
+        const bool isShardOrSkill = IsShardOrSkillItem(*itemId);
+        const bool isProgression = (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
+        if ((!isShardOrSkill && !isProgression) || GameManager::Instance().CheckAllInventories(*itemId)) {
             continue;
         }
 
-        Logger::Log(LogLevel::Warning, "[AP] Repairing acknowledged but missing shard:", itemName, "index:", index);
-        GameManager::Instance().GivePlayerItem(*itemId, true, shardDropInitialGrade_);
-        repairedShardIds.insert(*itemId);
+        const uint64_t generation = receivedItemGeneration_;
+        receivedItemGrantPending_ = true;
+        Logger::Log(LogLevel::File, "[AP] Repairing acknowledged but missing progression item or shard:",
+                    itemName, "index:", index);
+        GameManager::Instance().GivePlayerItem(
+            *itemId, true, isShardOrSkill ? static_cast<int>(shardDropInitialGrade_) : 1,
+            [this, generation, itemName, index](ItemGrantResult result) {
+                if (generation != receivedItemGeneration_) return;
+                receivedItemGrantPending_ = false;
+                if (result == ItemGrantResult::Rejected) {
+                    receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_RETRY_DELAY;
+                    Logger::Log(LogLevel::File,
+                                "[AP] Missing progression item or shard repair rejected; retry pending:",
+                                itemName, "index:", index);
+                    return;
+                }
+                receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_INTERVAL;
+                Logger::Log(LogLevel::File, "[AP] Missing progression item or shard repair succeeded:",
+                            itemName, "index:", index);
+            });
+        return;
     }
-    receivedShardsReconciled_ = true;
+    receivedProgressionInventoryReconciled_ = true;
 }
 
 std::string Archipelago::GetStateAsString() {
@@ -515,36 +594,47 @@ void Archipelago::InvokeDeathLink() {
     ap->poll();
 }
 
-bool Archipelago::GivePlayerItem(std::string& itemName, bool shouldDisplay) {
+bool Archipelago::GivePlayerItem(const std::string& itemName, bool shouldDisplay,
+                                 std::function<void(ItemGrantResult)> completion) {
     auto instance = GameManager::Instance;
     Logger::Log("Giving player item:", itemName);
     if (itemName.empty()) return false;
-    if (itemName == "Nothing") return true;
+    if (itemName == "Nothing") {
+        ThreadQueue::Instance().Enqueue([completion = std::move(completion)]() {
+            if (completion) completion(ItemGrantResult::Granted);
+        });
+        return true;
+    }
     if (itemName.starts_with("Max")) {
-        instance().GivePlayerMaxStatItem(itemName, shouldDisplay);
+        std::string maxStat = itemName;
+        instance().GivePlayerMaxStatItem(maxStat, shouldDisplay);
+        ThreadQueue::Instance().Enqueue([completion = std::move(completion)]() {
+            if (completion) completion(ItemGrantResult::Granted);
+        });
         return true;
         // Check for the bit coins (8 bit coin etc)
     } else if (std::isdigit(itemName[0]) && !itemName.starts_with("8") && !itemName.starts_with("16") &&
                !itemName.starts_with("32")) {
         int amount = std::stoi(itemName.substr(0, itemName.size() - 1));
         instance().GivePlayerCoin(amount, shouldDisplay);
+        ThreadQueue::Instance().Enqueue([completion = std::move(completion)]() {
+            if (completion) completion(ItemGrantResult::Granted);
+        });
         return true;
     }
 
     auto itemId = GameManager::Instance().GetIdFromDisplayName(itemName);
     if (itemId.has_value()) {
-        if (instance().ItemHasItemCategories(
-                itemId.value(), {SDK::ECarriedCatalog::AllShard, SDK::ECarriedCatalog::TriggerShard,
-                                 SDK::ECarriedCatalog::DirectionalShard, SDK::ECarriedCatalog::EffectiveShard,
-                                 SDK::ECarriedCatalog::EnchantShard, SDK::ECarriedCatalog::FamiliarShard})) {
+        if (IsShardOrSkillItem(itemId.value())) {
             // Shards don't normally show in chat, here we override
-            instance().GivePlayerItem(itemId.value(), true, shardDropInitialGrade_);
+            instance().GivePlayerItem(itemId.value(), true, static_cast<int>(shardDropInitialGrade_),
+                                      std::move(completion));
             return true;
         }
     }
 
     if (itemId.has_value()) {
-        instance().GivePlayerItem(itemId.value(), shouldDisplay);
+        instance().GivePlayerItem(itemId.value(), shouldDisplay, 1, std::move(completion));
         return true;
     } else {
         return false;
@@ -572,10 +662,14 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     localProgressLoaded_ = false;
     lastReceivedItemIndex_ = -1;
     lastQueuedItemIndex_ = -1;
+    receivedItemGrantPending_ = false;
+    receivedItemRetryAt_ = {};
+    receivedItemGeneration_++;
     pendingReceivedItems_.clear();
     receivedItems_.clear();
-    receivedShardsReconciled_ = false;
+    receivedProgressionInventoryReconciled_ = false;
     HookManager::ResetCompatibilityShardMasterData();
+    InGameTracker::Instance().ResetConnection();
 
     Logger::Log(LogLevel::Debug, "[AP]", "Connecting Player: ", slotName_, "with uri: ", normalizedUri);
     UpdateState(ArchipelagoConnectionState::Connecting);
@@ -618,10 +712,14 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     });
 
     ap->set_items_received_handler([this](const std::list<APClient::NetworkItem>& items) {
+        bool progressionChanged = false;
         for (const auto& item : items) {
             pendingReceivedItems_.insert_or_assign(item.index, item);
             receivedItems_.insert_or_assign(item.index, item);
+            progressionChanged |= (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
         }
+        if (progressionChanged) InGameTracker::Instance().InvalidateReachability("AP progression item received");
+        InGameTracker::Instance().MarkInventorySynchronized();
         ProcessReceivedItems();
     });
 
@@ -766,13 +864,21 @@ void Archipelago::Disconnect() {
     ap_slot_connect_sent = false;
     pendingReceivedItems_.clear();
     receivedItems_.clear();
+    receivedItemGrantPending_ = false;
+    receivedItemRetryAt_ = {};
+    receivedItemGeneration_++;
     localSavePrefix_.clear();
     localProgressLoaded_ = false;
     legacyReceivedItemIndex_.reset();
-    receivedShardsReconciled_ = false;
+    receivedProgressionInventoryReconciled_ = false;
+    InGameTracker::Instance().ResetConnection();
 }
 
 void Archipelago::Shutdown() {
+    InGameTracker::Instance().ResetConnection();
+    receivedItemGrantPending_ = false;
+    receivedItemRetryAt_ = {};
+    receivedItemGeneration_++;
     if (!ap) return;
 
     Logger::Log(LogLevel::File, "[AP] Gracefully closing connection during game shutdown:", slotName_);

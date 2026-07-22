@@ -31,6 +31,21 @@ std::vector<bool> Tracker::GetReachableRegions(Difficulty difficulty) const {
     return reachable;
 }
 
+std::vector<const generated::RoomMapData*> Tracker::GetReachableRooms(Difficulty difficulty) const {
+    const std::vector<bool> reachableRegions = GetReachableRegions(difficulty);
+    std::vector<const generated::RoomMapData*> reachableRooms;
+    for (std::size_t region = 0; region < reachableRegions.size(); ++region) {
+        if (!reachableRegions[region] || generated::REGION_ROOMS[region].empty()) continue;
+        const generated::RoomMapData* room = FindRoom(generated::REGION_ROOMS[region]);
+        if (room != nullptr) reachableRooms.push_back(room);
+    }
+    std::ranges::sort(reachableRooms, {}, [](const generated::RoomMapData* room) { return room->name; });
+    reachableRooms.erase(
+        std::ranges::unique(reachableRooms, {}, [](const generated::RoomMapData* room) { return room->name; }).begin(),
+        reachableRooms.end());
+    return reachableRooms;
+}
+
 std::vector<const generated::LocationData*> Tracker::GetReachableLocations(Difficulty difficulty) const {
     const std::vector<bool> reachableRegions = GetReachableRegions(difficulty);
     std::vector<const generated::LocationData*> reachableLocations;
@@ -76,6 +91,19 @@ const generated::RoomMapData* Tracker::FindRoom(std::string_view name) {
                                            return candidate.name < value;
                                        });
     return room != generated::ROOMS.end() && room->name == name ? &*room : nullptr;
+}
+
+bool Tracker::IsRoomCellVisible(const generated::RoomMapData& room, std::uint32_t roomAssignment) {
+    const auto first = generated::HIDDEN_ROOM_CELLS.begin() + room.hidden_cell_offset;
+    const auto last = first + room.hidden_cell_count;
+    return std::find(first, last, roomAssignment) == last;
+}
+
+bool Tracker::IsTraversalItem(std::string_view name) {
+    return std::ranges::find(generated::TRAVERSAL_ITEMS, name) != generated::TRAVERSAL_ITEMS.end() ||
+           std::ranges::find(generated::TRAVERSAL_NATIVE_ITEMS, name,
+                             &generated::NativeTraversalItemData::native_id) !=
+               generated::TRAVERSAL_NATIVE_ITEMS.end();
 }
 
 bool Tracker::IsRuleSatisfied(std::uint32_t rule) const {

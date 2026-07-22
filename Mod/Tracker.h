@@ -22,12 +22,15 @@ class Tracker {
     void SetInventory(const std::unordered_map<std::string, std::uint32_t>& inventory);
 
     std::vector<bool> GetReachableRegions(Difficulty difficulty) const;
+    std::vector<const generated::RoomMapData*> GetReachableRooms(Difficulty difficulty) const;
     std::vector<const generated::LocationData*> GetReachableLocations(Difficulty difficulty) const;
     std::vector<const generated::LocationData*> GetReachableMissingLocations(
         Difficulty difficulty, const std::unordered_set<std::uint64_t>& missingLocations) const;
     std::vector<std::string_view> GetReachableEnemyRooms(const generated::LocationData& location,
                                                          Difficulty difficulty) const;
     static const generated::RoomMapData* FindRoom(std::string_view name);
+    static bool IsRoomCellVisible(const generated::RoomMapData& room, std::uint32_t roomAssignment);
+    static bool IsTraversalItem(std::string_view name);
 
    private:
     bool IsRuleSatisfied(std::uint32_t rule) const;

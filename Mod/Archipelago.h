@@ -1,8 +1,10 @@
 #pragma once
 #include <apclient.hpp>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <list>
 #include <map>
 #include <optional>
@@ -12,6 +14,8 @@
 #include <vector>
 
 using json = nlohmann::json;
+
+enum class ItemGrantResult;
 
 struct ArchipelagoConnectionInfo {
     std::string uri;
@@ -65,6 +69,7 @@ class Archipelago {
     LocationCheckResult SendLocationChecks(const std::string& locationId);
     ItemLookupResult GetItemLookupResult(const std::string& itemName) const;
     bool IsMissingLocation(const std::string& locationName, std::uint64_t expectedId) const;
+    bool WasLocationClearedLocally(const std::string& locationName);
     std::unordered_map<std::string, std::uint32_t> GetTrackerInventory() const;
     std::unordered_set<std::uint64_t> GetMissingLocationIds() const;
 
@@ -79,7 +84,9 @@ class Archipelago {
     void LoadClearedLocations();
     void LoadLocalProgress();
     void ProcessReceivedItems();
-    void ReconcileReceivedShards();
+    void CompleteReceivedItem(int64_t itemIndex, const std::string& itemName, const std::string& savePrefix,
+                              uint64_t generation, ItemGrantResult result);
+    void ReconcileReceivedProgressionInventory();
     void TryMigrateLegacyProgress();
     void RecordClearedLocation(const std::string& locationId);
     void SaveConnectionInfo() const;
@@ -89,7 +96,8 @@ class Archipelago {
     void UpdateState(ArchipelagoConnectionState newState);
 
     // General Management Actions
-    bool GivePlayerItem(std::string& itemName, bool shouldDisplay = true);
+    bool GivePlayerItem(const std::string& itemName, bool shouldDisplay,
+                        std::function<void(ItemGrantResult)> completion = {});
 
     ArchipelagoConnectionState state_;
     std::string currentUri_;
@@ -106,9 +114,12 @@ class Archipelago {
     mutable bool wantsDeathlink_ = false;
     bool localProgressLoaded_ = false;
     bool processingReceivedItems_ = false;
-    bool receivedShardsReconciled_ = false;
+    bool receivedItemGrantPending_ = false;
+    bool receivedProgressionInventoryReconciled_ = false;
     bool clearedLocationsLoaded_ = false;
     std::atomic_flag polling_ = ATOMIC_FLAG_INIT;
+    std::chrono::steady_clock::time_point receivedItemRetryAt_{};
+    uint64_t receivedItemGeneration_ = 0;
 
     std::map<int64_t, APClient::NetworkItem> pendingReceivedItems_;
     std::map<int64_t, APClient::NetworkItem> receivedItems_;

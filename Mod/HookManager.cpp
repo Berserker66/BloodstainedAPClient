@@ -368,8 +368,12 @@ bool HookManager::Init() {
 
     // When game and player completely load in
     NotifyOnClassFunction("PBGameMode_Miriam_BP_C", "OnLoadGameCompletely", [](void* obj) {
-        MainMenuStatus::Instance().Hide();
+        // The title world and its widgets have already been destroyed by this point.
+        // Drop our stale references without invoking a method on the dead widget.
+        MainMenuStatus::Instance().Forget();
         GameManager::Instance().PlayerAlive();
+        InGameTracker::Instance().LoadDisplayMode();
+        InGameTracker::Instance().InvalidateReachability("save loaded");
         Archipelago::Instance().ResetLocalLocationCache();
         Gui::Instance().TryAutoConnect();
         APBridge::Instance().EnqueueSync();
@@ -386,6 +390,22 @@ bool HookManager::Init() {
 bool HookManager::PostInit() {
     NotifyOnClassFunction("MapManageBlueprint_C", "Event_MapStart",
                           [](void* obj) { InGameTracker::Instance().ApplyMapMarkers(obj); });
+    NotifyOnClassFunction("MapManageBlueprint_C", "Tick",
+                          [](void* obj) { InGameTracker::Instance().ApplyDeferredGhostMap(obj); });
+    NotifyOnClassFunction("MiniMapBlueprint_C", "Tick",
+                          [](void* obj) { InGameTracker::Instance().ApplyMiniMap(obj); });
+
+    NotifyOnClassFunctionWithParams(
+        "PBCharacterInventoryComponent", "GetItemWithDisplay",
+        [](void* obj, const std::string& functionName, void* rawParams) {
+            if (functionName != "GetItemWithDisplay" || !rawParams) return;
+
+            auto* params = static_cast<SDK::Params::PBCharacterInventoryComponent_GetItemWithDisplay*>(rawParams);
+            if (params->Quantity <= 0 || !params->ReturnValue) return;
+
+            const std::string nativeItemId = params->newItemId.ToString();
+            if (!nativeItemId.empty()) InGameTracker::Instance().ObserveNativeItem(nativeItemId);
+        });
 
     // Whens constantly when the player is alive
     NotifyOnClassFunction("Chr_P0000_C", "GetAdditionalCameraTargetLocations", [](void* obj) {

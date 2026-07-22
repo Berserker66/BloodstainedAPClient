@@ -44,7 +44,7 @@
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
-    <LocalDebuggerEnvironment>BS_GAME_PATH=C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64;%PATH%</LocalDebuggerEnvironment>
+    <LocalDebuggerEnvironment>BS_GAME_PATH=C:\Program Files (x86)\Steam\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64;%PATH%</LocalDebuggerEnvironment>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -52,7 +52,7 @@
     <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
-    <LocalDebuggerEnvironment>BS_GAME_PATH=C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64;%PATH%</LocalDebuggerEnvironment>
+    <LocalDebuggerEnvironment>BS_GAME_PATH=C:\Program Files (x86)\Steam\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64;%PATH%</LocalDebuggerEnvironment>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -72,16 +72,16 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros">
-    <BSGamePath>C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
+    <BSGamePath>C:\Program Files (x86)\Steam\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <BSGamePath>C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
+    <BSGamePath>C:\Program Files (x86)\Steam\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
     <TargetName>BloodstainedAP</TargetName>
     <TargetExt>.asi</TargetExt>
     <ExternalIncludePath>CppSDK;CppSDK/SDK;subprojects;$(ExternalIncludePath)</ExternalIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <BSGamePath>C:\SteamLibrary\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
+    <BSGamePath>C:\Program Files (x86)\Steam\steamapps\common\Bloodstained Ritual of the Night\BloodstainedRotN\Binaries\Win64</BSGamePath>
     <TargetName>BloodstainedAP</TargetName>
     <TargetExt>.asi</TargetExt>
     <ExternalIncludePath>CppSDK;CppSDK/SDK;subprojects;$(ExternalIncludePath)</ExternalIncludePath>
@@ -122,7 +122,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>CppSDK/SDK;subprojects/json/include;subprojects/valijson/include;subprojects/wswrap/include;subprojects/websocketpp;subprojects/asio/asio/include;subprojects/asio/include;subprojects/apclientpp;.;CppSDK;extern;extern/libdetour;extern/imgui;extern/imgui/backends;extern/kiero;extern/minhook/include;extern/minhook/src;vcpkg_installed\x64-windows-static-md\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus /bigobj /experimental:deterministic /pathmap:$(ProjectDir)= %(AdditionalOptions)</AdditionalOptions>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
     </ClCompile>
     <Link>
@@ -147,7 +147,7 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>CppSDK/SDK;subprojects/json/include;subprojects/valijson/include;subprojects/wswrap/include;subprojects/websocketpp;subprojects/asio/asio/include;subprojects/asio/include;subprojects/apclientpp;.;CppSDK;extern;extern/libdetour;extern/imgui;extern/imgui/backends;extern/kiero;extern/minhook/include;extern/minhook/src;vcpkg_installed/x64-windows-static-md/include</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:__cplusplus /bigobj /experimental:deterministic /pathmap:$(ProjectDir)= %(AdditionalOptions)</AdditionalOptions>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <Optimization>MaxSpeed</Optimization>
     </ClCompile>

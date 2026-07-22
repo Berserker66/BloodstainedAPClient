@@ -10,6 +10,7 @@
 #include <UnrealContainers.hpp>
 #include <algorithm>
 #include <format>
+#include <utility>
 
 #include "CoreUObject_classes.hpp"
 #include "Engine_classes.hpp"
@@ -35,11 +36,14 @@ bool GameManager::IsInstanceValid(SDK::UObject* object, const char* c_str) {
 
 bool GameManager::IsPlayerLoadedInGame() {
     auto playerController = GameManager::Instance().PlayerController();
-    if (!playerController) return false;
+    if (!playerController || !playerController->Class) return false;
     auto playerControllerName = playerController->GetName();
     if (playerControllerName != "PBPlayerController_0") return false;
     auto player = (SDK::APB_Chr_PlayerRoot_C*)playerController->Pawn;
-    if (!SDK::UKismetSystemLibrary::IsValid(player)) return false;
+    // This method is used by PostInit's worker-thread polling loop. A generated
+    // UKismetSystemLibrary::IsValid call goes through ProcessEvent, so restrict
+    // the early readiness check to raw UObject state.
+    if (!player || !player->Class) return false;
     return true;
 }
 
@@ -278,29 +282,33 @@ bool GameManager::ItemHasItemCategories(const std::string& itemName,
     return false;
 }
 
-void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, int count) {
-    auto player = GameManager::Instance().Player();
-    auto inventory = player->CharacterInventory;
-    SDK::UPBGameInstance* inst = (SDK::UPBGameInstance*)GameManager::Instance().GameInstance();
-
-    auto itemName = FNameFromString(name);
-
-    SDK::FPBItemCatalogData itemData = SDK::FPBItemCatalogData();
-
-    auto itemInInventory = GameManager::Instance().CheckAllInventories(name);
-    inventory->GetItemDataById(itemName, &itemData);
-
-    if (itemInInventory.has_value()) {
-        if (itemInInventory->Num == itemInInventory->MaxNum) {
-            auto iconId = inventory->GetItemIcon(itemInInventory->ID);
-            GameManager::Instance().SendInGameNotification("Limit reached: " + itemData.Name.ToString(), iconId);
+void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, int count,
+                                 std::function<void(ItemGrantResult)> completion) {
+    ThreadQueue::Instance().Enqueue([name, shouldDisplay, count, completion = std::move(completion)]() {
+        auto& gameManager = GameManager::Instance();
+        if (!gameManager.CanReceiveItems()) {
+            if (completion) completion(ItemGrantResult::Rejected);
+            return;
         }
-        Logger::Log("Player has", itemInInventory->Num, "of", name);
-    }
 
-    ThreadQueue::Instance().Enqueue([itemName, inventory, shouldDisplay, count]() {
-        auto instance = (SDK::UPBGameInstance*)GameManager::Instance().GameInstance();
-        inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
+        auto* inventory = gameManager.Player()->CharacterInventory;
+        auto itemName = FNameFromString(name);
+        SDK::FPBItemCatalogData itemData{};
+        inventory->GetItemDataById(itemName, &itemData);
+
+        auto itemInInventory = gameManager.CheckAllInventories(name);
+        if (itemInInventory.has_value()) {
+            Logger::Log("Player has", itemInInventory->Num, "of", name);
+            if (itemInInventory->Num >= itemInInventory->MaxNum) {
+                auto iconId = inventory->GetItemIcon(itemInInventory->ID);
+                gameManager.SendInGameNotification("Limit reached: " + itemData.Name.ToString(), iconId);
+                if (completion) completion(ItemGrantResult::AtCapacity);
+                return;
+            }
+        }
+
+        const bool granted = inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
+        if (completion) completion(granted ? ItemGrantResult::Granted : ItemGrantResult::Rejected);
     });
 }
 

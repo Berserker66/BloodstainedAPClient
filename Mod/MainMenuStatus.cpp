@@ -62,6 +62,10 @@ void MainMenuStatus::Show(SDK::UObject* worldContext) {
 
 void MainMenuStatus::Hide() {
     if (widget && SDK::UKismetSystemLibrary::IsValid(widget)) widget->RemoveFromParent();
+    Forget();
+}
+
+void MainMenuStatus::Forget() {
     widget = nullptr;
     textBlock = nullptr;
     lastRefresh = 0;

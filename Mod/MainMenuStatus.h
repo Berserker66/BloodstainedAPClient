@@ -13,6 +13,7 @@ class MainMenuStatus {
 
     void Show(SDK::UObject* worldContext);
     void Hide();
+    void Forget();
 
    private:
     enum class PakStatus {
