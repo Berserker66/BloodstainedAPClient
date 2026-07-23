@@ -38,9 +38,14 @@ std::string game_seed;
 const int MAX_SEED_LENGTH = 32;
 
 const std::string ITEM_INDEX_SAVE_VALUE = "ItemIndex";
+const std::string ITEM_LEDGER_VERSION_VALUE = "ItemLedgerVersion";
+const std::string ITEM_LEDGER_OBSERVED_COUNT_VALUE = "ItemLedgerObservedCount";
+const std::string ITEM_LEDGER_AWARDED_COUNT_VALUE = "ItemLedgerAwardedCount";
 const std::string CONNECTION_SAVE_PREFIX = "AP_LastConnection_";
 const std::string CLEARED_LOCATION_SAVE_PREFIX = "AP_ClearedLocation_";
 const int32_t CONNECTION_SAVE_VERSION = 1;
+const int32_t ITEM_LEDGER_VERSION = 1;
+const int32_t MAX_ITEM_LEDGER_ENTRIES = 4096;
 const size_t MAX_CONNECTION_FIELD_LENGTH = 1024;
 const int32_t MAX_CLEARED_LOCATIONS = 4096;
 const std::chrono::milliseconds ITEM_GRANT_INTERVAL(100);
@@ -54,12 +59,50 @@ using json = nlohmann::json;
 static std::optional<int32_t> LoadSavedValue(const std::string& saveValueName);
 static std::optional<std::string> LoadSavedString(const std::string& saveValueName);
 
+static std::optional<int64_t> LoadInt64(const std::string& name) {
+    const auto low = LoadSavedValue(name + "Low");
+    const auto high = LoadSavedValue(name + "High");
+    if (!low || !high) return std::nullopt;
+    const uint64_t value = static_cast<uint32_t>(*low) | (static_cast<uint64_t>(static_cast<uint32_t>(*high)) << 32);
+    return static_cast<int64_t>(value);
+}
+
 static bool IsShardOrSkillItem(const std::string& itemId) {
     return GameManager::Instance().ItemHasItemCategories(
         itemId, {SDK::ECarriedCatalog::AllShard, SDK::ECarriedCatalog::TriggerShard,
                  SDK::ECarriedCatalog::DirectionalShard, SDK::ECarriedCatalog::EffectiveShard,
                  SDK::ECarriedCatalog::EnchantShard, SDK::ECarriedCatalog::FamiliarShard,
                  SDK::ECarriedCatalog::Skill});
+}
+
+static std::optional<std::string_view> GetNativeItemName(int64_t itemId) {
+    const auto& bindings = bloodstained::tracker::generated::ITEM_BINDINGS;
+    const auto binding = std::lower_bound(bindings.begin(), bindings.end(), static_cast<std::uint64_t>(itemId),
+                                          [](const auto& entry, std::uint64_t id) { return entry.id < id; });
+    if (binding == bindings.end() || binding->id != static_cast<std::uint64_t>(itemId)) return std::nullopt;
+    return binding->native_name;
+}
+
+static std::optional<int64_t> GetItemId(std::string_view nativeName) {
+    const auto& bindings = bloodstained::tracker::generated::ITEM_BINDINGS;
+    const auto binding = std::find_if(bindings.begin(), bindings.end(), [nativeName](const auto& entry) {
+        return entry.native_name == nativeName;
+    });
+    return binding == bindings.end() ? std::nullopt : std::optional<int64_t>(binding->id);
+}
+
+static std::optional<int64_t> GetLocationId(std::string_view nativeName) {
+    const auto& bindings = bloodstained::tracker::generated::LOCATION_BINDINGS;
+    const auto binding = std::find_if(bindings.begin(), bindings.end(), [nativeName](const auto& entry) {
+        return entry.native_name == nativeName;
+    });
+    return binding == bindings.end() ? std::nullopt : std::optional<int64_t>(binding->id);
+}
+
+static std::string GetDisplayItemName(int64_t itemId) {
+    if (ap && ap->is_data_package_valid()) return ap->get_item_name(itemId, ap->get_game());
+    const auto nativeName = GetNativeItemName(itemId);
+    return nativeName ? std::string(*nativeName) : "Unknown item " + std::to_string(itemId);
 }
 
 Archipelago& Archipelago::Instance() {
@@ -104,18 +147,17 @@ void Archipelago::ConnectSlot() {
 }
 
 ItemLookupResult Archipelago::GetItemLookupResult(const std::string& itemName) const {
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return ItemLookupResult::NotReady;
-    return ap->get_item_id(itemName) == APClient::INVALID_NAME_ID ? ItemLookupResult::UnknownItem
-                                                                 : ItemLookupResult::KnownItem;
+    if (!ap || !IsConnected()) return ItemLookupResult::NotReady;
+    return GetItemId(itemName) ? ItemLookupResult::KnownItem : ItemLookupResult::UnknownItem;
 }
 
 std::unordered_map<std::string, std::uint32_t> Archipelago::GetTrackerInventory() const {
     std::unordered_map<std::string, std::uint32_t> inventory;
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return inventory;
+    if (!ap || !IsConnected()) return inventory;
 
     for (const auto& [index, item] : receivedItems_) {
-        std::string itemName = ap->get_item_name(item.item, ap->get_game());
-        inventory[itemName]++;
+        const auto itemName = GetNativeItemName(item.item);
+        if (itemName) inventory[std::string(*itemName)]++;
     }
     return inventory;
 }
@@ -130,10 +172,10 @@ std::unordered_set<std::uint64_t> Archipelago::GetMissingLocationIds() const {
 }
 
 bool Archipelago::IsMissingLocation(const std::string& locationName, std::uint64_t expectedId) const {
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return false;
-    const int64_t locationId = ap->get_location_id(locationName);
-    return locationId != APClient::INVALID_NAME_ID && static_cast<std::uint64_t>(locationId) == expectedId &&
-           ap->get_missing_locations().contains(locationId);
+    if (!ap || !IsConnected()) return false;
+    const auto locationId = GetLocationId(locationName);
+    return locationId && static_cast<std::uint64_t>(*locationId) == expectedId &&
+           ap->get_missing_locations().contains(*locationId);
 }
 
 bool Archipelago::WasLocationClearedLocally(const std::string& locationName) {
@@ -158,17 +200,17 @@ static LocationResolution ResolveLocation(const std::string& locationId, const s
         return missingLocations.contains(locationId) || checkedLocations.contains(locationId);
     };
 
-    int64_t apLocationId = ap->get_location_id(locationWithoutPrefix);
-    if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
+    auto apLocationId = GetLocationId(locationWithoutPrefix);
+    if (apLocationId && locationExistsInWorld(*apLocationId)) {
         resolution.exists = true;
-        if (missingLocations.contains(apLocationId)) resolution.missing.insert(apLocationId);
+        if (missingLocations.contains(*apLocationId)) resolution.missing.insert(*apLocationId);
     } else {
         for (int i = 0; i <= 3; i++) {
             std::string fullLocation = locationWithoutPrefix + "." + std::to_string(i);
-            apLocationId = ap->get_location_id(fullLocation);
-            if (apLocationId != APClient::INVALID_NAME_ID && locationExistsInWorld(apLocationId)) {
+            apLocationId = GetLocationId(fullLocation);
+            if (apLocationId && locationExistsInWorld(*apLocationId)) {
                 resolution.exists = true;
-                if (missingLocations.contains(apLocationId)) resolution.missing.insert(apLocationId);
+                if (missingLocations.contains(*apLocationId)) resolution.missing.insert(*apLocationId);
             }
         }
     }
@@ -218,7 +260,7 @@ void Archipelago::RecordClearedLocation(const std::string& locationId) {
 }
 
 size_t Archipelago::SendMissingClearedLocations() {
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return 0;
+    if (!ap || !IsConnected()) return 0;
 
     LoadClearedLocations();
     const auto missingLocations = ap->get_missing_locations();
@@ -251,7 +293,7 @@ size_t Archipelago::SendMissingClearedLocations() {
 LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationId) {
     if (!locationId.starts_with("AP_")) return LocationCheckResult::UnknownLocation;
     RecordClearedLocation(locationId);
-    if (!ap || !IsConnected() || !ap->is_data_package_valid()) return LocationCheckResult::NotReady;
+    if (!ap || !IsConnected()) return LocationCheckResult::NotReady;
 
     const auto missingLocations = ap->get_missing_locations();
     const auto checkedLocations = ap->get_checked_locations();
@@ -275,6 +317,11 @@ void Archipelago::SaveLocalValue(const std::string& saveValueName, int32_t value
     std::wstring wideSaveValueName(saveValueName.begin(), saveValueName.end());
     auto saveValueId = SDK::UKismetStringLibrary::Conv_StringToName(wideSaveValueName.c_str());
     SDK::UPBGameInstance::SetSavedValue(saveValueId, value);
+}
+
+void Archipelago::SaveLocalInt64(const std::string& name, int64_t value) const {
+    SaveLocalValue(name + "Low", static_cast<int32_t>(static_cast<uint64_t>(value) & 0xffffffffull));
+    SaveLocalValue(name + "High", static_cast<int32_t>(static_cast<uint64_t>(value) >> 32));
 }
 
 static std::optional<int32_t> LoadSavedValue(const std::string& saveValueName) {
@@ -343,6 +390,20 @@ void Archipelago::LoadLocalProgress() {
     if (!ap || localSavePrefix_.empty()) return;
 
     legacyReceivedItemIndex_.reset();
+    LoadItemLedger();
+    if (itemLedgerLoaded_) {
+        lastReceivedItemIndex_ = observedItemIdsByIndex_.empty() ? -1 : observedItemIdsByIndex_.rbegin()->first;
+        lastQueuedItemIndex_ = lastReceivedItemIndex_;
+        localProgressLoaded_ = true;
+        receivedItemGrantPending_ = false;
+        receivedItemRetryAt_ = {};
+        receivedItemGeneration_++;
+        receivedProgressionInventoryReconciled_ = false;
+        Logger::Log(LogLevel::File, "[AP] Loaded item entitlement ledger; observed indices:",
+                    observedItemIdsByIndex_.size(), "awarded item types:", awardedItemCounts_.size(),
+                    "prefix:", localSavePrefix_);
+        return;
+    }
 
     auto getLocalValue = [this](const std::string& name, int32_t defaultValue) {
         std::string saveValueName = localSavePrefix_ + name;
@@ -385,6 +446,13 @@ void Archipelago::LoadLocalProgress() {
         if (itemIndex == missingValue) itemIndex = -1;
     }
 
+    if (itemIndex >= 0 && !legacyReceivedItemIndex_) {
+        legacyReceivedItemIndex_ = itemIndex;
+        itemIndex = -1;
+        Logger::Log(LogLevel::File, "[AP] Found pre-ledger item index pending entitlement migration:",
+                    *legacyReceivedItemIndex_);
+    }
+
     lastReceivedItemIndex_ = itemIndex;
     lastQueuedItemIndex_ = lastReceivedItemIndex_;
     localProgressLoaded_ = !legacyReceivedItemIndex_.has_value();
@@ -395,6 +463,98 @@ void Archipelago::LoadLocalProgress() {
     if (localProgressLoaded_) {
         Logger::Log("[AP] Loaded local item index:", lastReceivedItemIndex_, "prefix:", localSavePrefix_);
     }
+}
+
+void Archipelago::LoadItemLedger() {
+    const bool sameInMemoryLedger = loadedLedgerPrefix_ == localSavePrefix_;
+    if (!sameInMemoryLedger) {
+        observedItemIdsByIndex_.clear();
+        awardedItemCounts_.clear();
+    }
+
+    itemLedgerLoaded_ = sameInMemoryLedger;
+    const auto version = LoadSavedValue(localSavePrefix_ + ITEM_LEDGER_VERSION_VALUE);
+    if (!version || *version != ITEM_LEDGER_VERSION) {
+        loadedLedgerPrefix_ = localSavePrefix_;
+        return;
+    }
+    itemLedgerLoaded_ = true;
+
+    const int32_t observedCount =
+        LoadSavedValue(localSavePrefix_ + ITEM_LEDGER_OBSERVED_COUNT_VALUE).value_or(0);
+    if (observedCount >= 0 && observedCount <= MAX_ITEM_LEDGER_ENTRIES) {
+        for (int32_t entry = 0; entry < observedCount; entry++) {
+            const std::string prefix = localSavePrefix_ + "ItemLedgerObserved" + std::to_string(entry);
+            const auto index = LoadInt64(prefix + "Index");
+            const auto itemId = LoadInt64(prefix + "Item");
+            if (index && itemId && *index >= 0) observedItemIdsByIndex_.insert_or_assign(*index, *itemId);
+        }
+    } else {
+        Logger::Log(LogLevel::File, "[AP] Ignoring invalid observed-item ledger count:", observedCount);
+    }
+
+    const int32_t awardedCount =
+        LoadSavedValue(localSavePrefix_ + ITEM_LEDGER_AWARDED_COUNT_VALUE).value_or(0);
+    if (awardedCount >= 0 && awardedCount <= MAX_ITEM_LEDGER_ENTRIES) {
+        for (int32_t entry = 0; entry < awardedCount; entry++) {
+            const std::string prefix = localSavePrefix_ + "ItemLedgerAwarded" + std::to_string(entry);
+            const auto itemId = LoadInt64(prefix + "Item");
+            const int32_t count = LoadSavedValue(prefix + "Count").value_or(0);
+            if (itemId && count > 0) {
+                auto& inMemoryCount = awardedItemCounts_[*itemId];
+                inMemoryCount = std::max(inMemoryCount, static_cast<std::uint32_t>(count));
+            }
+        }
+    } else {
+        Logger::Log(LogLevel::File, "[AP] Ignoring invalid awarded-item ledger count:", awardedCount);
+    }
+    loadedLedgerPrefix_ = localSavePrefix_;
+}
+
+void Archipelago::PersistObservedItemLedger() const {
+    if (localSavePrefix_.empty()) return;
+    SaveLocalValue(localSavePrefix_ + ITEM_LEDGER_VERSION_VALUE, ITEM_LEDGER_VERSION);
+    SaveLocalValue(localSavePrefix_ + ITEM_LEDGER_OBSERVED_COUNT_VALUE,
+                   static_cast<int32_t>(observedItemIdsByIndex_.size()));
+    int32_t entry = 0;
+    for (const auto& [index, itemId] : observedItemIdsByIndex_) {
+        const std::string prefix = localSavePrefix_ + "ItemLedgerObserved" + std::to_string(entry++);
+        SaveLocalInt64(prefix + "Index", index);
+        SaveLocalInt64(prefix + "Item", itemId);
+    }
+}
+
+void Archipelago::PersistAwardedItemCounts() const {
+    if (localSavePrefix_.empty()) return;
+    std::vector<std::pair<int64_t, std::uint32_t>> counts(awardedItemCounts_.begin(), awardedItemCounts_.end());
+    std::ranges::sort(counts);
+    SaveLocalValue(localSavePrefix_ + ITEM_LEDGER_VERSION_VALUE, ITEM_LEDGER_VERSION);
+    SaveLocalValue(localSavePrefix_ + ITEM_LEDGER_AWARDED_COUNT_VALUE, static_cast<int32_t>(counts.size()));
+    int32_t entry = 0;
+    for (const auto& [itemId, count] : counts) {
+        const std::string prefix = localSavePrefix_ + "ItemLedgerAwarded" + std::to_string(entry++);
+        SaveLocalInt64(prefix + "Item", itemId);
+        SaveLocalValue(prefix + "Count", static_cast<int32_t>(count));
+    }
+}
+
+void Archipelago::UpdateObservedItemLedger() {
+    if (localSavePrefix_.empty()) return;
+    std::map<int64_t, int64_t> serverLedger;
+    for (const auto& [index, item] : receivedItems_) serverLedger.insert_or_assign(index, item.item);
+    if (serverLedger == observedItemIdsByIndex_) return;
+
+    for (const auto& [index, itemId] : serverLedger) {
+        const auto previous = observedItemIdsByIndex_.find(index);
+        if (previous != observedItemIdsByIndex_.end() && previous->second != itemId) {
+            Logger::Log(LogLevel::File, "[AP] Server item history changed at index:", index,
+                        "previous ID:", previous->second, "current ID:", itemId);
+        }
+    }
+    observedItemIdsByIndex_ = std::move(serverLedger);
+    itemLedgerLoaded_ = true;
+    loadedLedgerPrefix_ = localSavePrefix_;
+    PersistObservedItemLedger();
 }
 
 void Archipelago::ProcessReceivedItems() {
@@ -408,15 +568,11 @@ void Archipelago::ProcessReceivedItems() {
         ~ProcessingGuard() { active = false; }
     } processingGuard{processingReceivedItems_};
 
-    if (!ap || !ap->is_data_package_valid() || !GameManager::Instance().CanReceiveItems()) {
+    if (!ap || !GameManager::Instance().CanReceiveItems()) {
         return;
     }
     TryMigrateLegacyProgress();
     if (!localProgressLoaded_) return;
-
-    while (!pendingReceivedItems_.empty() && pendingReceivedItems_.begin()->first <= lastReceivedItemIndex_) {
-        pendingReceivedItems_.erase(pendingReceivedItems_.begin());
-    }
 
     // Repair acknowledged progression before newer deliveries. Otherwise one
     // unresolved later item can indefinitely starve recovery of a required item
@@ -425,21 +581,32 @@ void Archipelago::ProcessReceivedItems() {
     if (receivedItemGrantPending_ || !receivedProgressionInventoryReconciled_) {
         return;
     }
-    if (pendingReceivedItems_.empty()) return;
+    std::unordered_map<int64_t, std::uint32_t> occurrences;
+    const APClient::NetworkItem* itemToGrant = nullptr;
+    for (const auto& [index, item] : receivedItems_) {
+        const std::uint32_t occurrence = ++occurrences[item.item];
+        if (occurrence > awardedItemCounts_[item.item]) {
+            itemToGrant = &item;
+            break;
+        }
+    }
+    if (!itemToGrant) return;
 
-    const auto& item = pendingReceivedItems_.begin()->second;
+    const auto& item = *itemToGrant;
     const int64_t itemIndex = item.index;
-    const std::string itemName = ap->get_item_name(item.item, ap->get_game());
+    const auto nativeItemName = GetNativeItemName(item.item);
+    const std::string itemName = nativeItemName ? std::string(*nativeItemName) : std::string();
+    const std::string displayItemName = GetDisplayItemName(item.item);
     const std::string savePrefix = localSavePrefix_;
     const uint64_t generation = receivedItemGeneration_;
-    Logger::Log(LogLevel::File, "[AP] Attempting received item grant:", itemName, "index:", itemIndex,
-                "committed index:", lastReceivedItemIndex_);
+    Logger::Log(LogLevel::File, "[AP] Attempting received item grant:", displayItemName, "ID:", item.item,
+                "index:", itemIndex, "committed index:", lastReceivedItemIndex_);
 
     receivedItemGrantPending_ = true;
     lastQueuedItemIndex_ = itemIndex;
     if (!GivePlayerItem(itemName, false,
-                        [this, itemIndex, itemName, savePrefix, generation](ItemGrantResult result) {
-                            CompleteReceivedItem(itemIndex, itemName, savePrefix, generation, result);
+                        [this, itemIndex, itemId = item.item, itemName, savePrefix, generation](ItemGrantResult result) {
+                            CompleteReceivedItem(itemIndex, itemId, itemName, savePrefix, generation, result);
                         })) {
         receivedItemGrantPending_ = false;
         lastQueuedItemIndex_ = lastReceivedItemIndex_;
@@ -448,7 +615,7 @@ void Archipelago::ProcessReceivedItems() {
     }
 }
 
-void Archipelago::CompleteReceivedItem(int64_t itemIndex, const std::string& itemName,
+void Archipelago::CompleteReceivedItem(int64_t itemIndex, int64_t itemId, const std::string& itemName,
                                        const std::string& savePrefix, uint64_t generation, ItemGrantResult result) {
     if (generation != receivedItemGeneration_) {
         Logger::Log(LogLevel::File, "[AP] Ignoring stale received item result:", itemName, "index:", itemIndex);
@@ -470,10 +637,13 @@ void Archipelago::CompleteReceivedItem(int64_t itemIndex, const std::string& ite
         return;
     }
 
-    SaveLocalValue(savePrefix + ITEM_INDEX_SAVE_VALUE, static_cast<int32_t>(itemIndex));
-    lastReceivedItemIndex_ = itemIndex;
+    awardedItemCounts_[itemId]++;
+    itemLedgerLoaded_ = true;
+    loadedLedgerPrefix_ = localSavePrefix_;
+    PersistAwardedItemCounts();
+    lastReceivedItemIndex_ = std::max(lastReceivedItemIndex_, itemIndex);
+    SaveLocalValue(savePrefix + ITEM_INDEX_SAVE_VALUE, static_cast<int32_t>(lastReceivedItemIndex_));
     lastQueuedItemIndex_ = itemIndex;
-    pendingReceivedItems_.erase(itemIndex);
     receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_INTERVAL;
     if (result == ItemGrantResult::AtCapacity) {
         Logger::Log(LogLevel::File, "[AP] Received item already at native inventory capacity:", itemName,
@@ -490,7 +660,9 @@ void Archipelago::TryMigrateLegacyProgress() {
     std::unordered_set<std::string> matchingItemIds;
     for (const auto& [index, item] : receivedItems_) {
         if (index > *legacyReceivedItemIndex_) continue;
-        const std::string itemName = ap->get_item_name(item.item, ap->get_game());
+        const auto nativeItemName = GetNativeItemName(item.item);
+        if (!nativeItemName) continue;
+        const std::string itemName(*nativeItemName);
         const auto itemId = GameManager::Instance().GetIdFromDisplayName(itemName);
         if (itemId && GameManager::Instance().CheckAllInventories(*itemId)) {
             matchingItemIds.insert(*itemId);
@@ -504,6 +676,16 @@ void Archipelago::TryMigrateLegacyProgress() {
 
     lastReceivedItemIndex_ = hasPreviouslyReceivedInventory ? *legacyReceivedItemIndex_ : -1;
     lastQueuedItemIndex_ = lastReceivedItemIndex_;
+    if (hasPreviouslyReceivedInventory) {
+        for (const auto& [index, item] : receivedItems_) {
+            if (index > *legacyReceivedItemIndex_) break;
+            awardedItemCounts_[item.item]++;
+        }
+    }
+    itemLedgerLoaded_ = true;
+    loadedLedgerPrefix_ = localSavePrefix_;
+    UpdateObservedItemLedger();
+    PersistAwardedItemCounts();
     SaveLocalValue(localSavePrefix_ + ITEM_INDEX_SAVE_VALUE, static_cast<int32_t>(lastReceivedItemIndex_));
     Logger::Log("[AP]", hasPreviouslyReceivedInventory ? "Migrated legacy item index:" : "Ignored legacy item index:",
                 *legacyReceivedItemIndex_, "loaded index:", lastReceivedItemIndex_);
@@ -517,10 +699,13 @@ void Archipelago::ReconcileReceivedProgressionInventory() {
         return;
     }
 
+    std::unordered_map<int64_t, std::uint32_t> occurrences;
     for (const auto& [index, item] : receivedItems_) {
-        if (index > lastReceivedItemIndex_) continue;
+        if (++occurrences[item.item] > awardedItemCounts_[item.item]) continue;
 
-        std::string itemName = ap->get_item_name(item.item, ap->get_game());
+        const auto nativeItemName = GetNativeItemName(item.item);
+        if (!nativeItemName) continue;
+        std::string itemName(*nativeItemName);
         const auto itemId = GameManager::Instance().GetIdFromDisplayName(itemName);
         if (!itemId) continue;
 
@@ -671,6 +856,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     ResetLocalLocationCache();
     localSavePrefix_.clear();
     localProgressLoaded_ = false;
+    itemLedgerLoaded_ = false;
     lastReceivedItemIndex_ = -1;
     lastQueuedItemIndex_ = -1;
     receivedItemGrantPending_ = false;
@@ -724,10 +910,21 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
 
     ap->set_items_received_handler([this](const std::list<APClient::NetworkItem>& items) {
         bool progressionChanged = false;
+        if (!items.empty() && items.front().index == 0) {
+            // A batch beginning at zero is an authoritative history replay.
+            // Replace the snapshot so server rollbacks and shortened histories
+            // cannot leave stale tail entries in the entitlement calculation.
+            receivedItems_.clear();
+        }
         for (const auto& item : items) {
-            pendingReceivedItems_.insert_or_assign(item.index, item);
             receivedItems_.insert_or_assign(item.index, item);
-            const std::string itemName = ap->get_item_name(item.item, ap->get_game());
+            const auto nativeItemName = GetNativeItemName(item.item);
+            if (!nativeItemName) {
+                Logger::Log(LogLevel::File, "[AP] Received unknown Bloodstained item ID:", item.item,
+                            "index:", item.index);
+                continue;
+            }
+            const std::string itemName(*nativeItemName);
             const bool isNativeTraversal = std::any_of(
                 bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.begin(),
                 bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.end(),
@@ -736,6 +933,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
                                        (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
             progressionChanged |= isProgression;
         }
+        UpdateObservedItemLedger();
         if (progressionChanged) {
             // ReceivedItems can be delivered in multiple batches. A previous
             // batch may have completed reconciliation before this progression
@@ -780,6 +978,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
         localSavePrefix_ = "AP_" + ap->get_seed() + "_" + std::to_string(ap->get_team_number()) + "_" +
                            std::to_string(ap->get_player_number()) + "_Save" + std::to_string(saveSlotIndex) + "_";
         LoadLocalProgress();
+        UpdateObservedItemLedger();
         UpdateState(ArchipelagoConnectionState::SlotConnected);
         SendMissingClearedLocations();
         HookManager::ApplyCompatibilityShardMasterData();

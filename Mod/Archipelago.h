@@ -84,12 +84,17 @@ class Archipelago {
     void LoadClearedLocations();
     void LoadLocalProgress();
     void ProcessReceivedItems();
-    void CompleteReceivedItem(int64_t itemIndex, const std::string& itemName, const std::string& savePrefix,
-                              uint64_t generation, ItemGrantResult result);
+    void CompleteReceivedItem(int64_t itemIndex, int64_t itemId, const std::string& itemName,
+                              const std::string& savePrefix, uint64_t generation, ItemGrantResult result);
+    void LoadItemLedger();
+    void PersistAwardedItemCounts() const;
+    void PersistObservedItemLedger() const;
+    void UpdateObservedItemLedger();
     void ReconcileReceivedProgressionInventory();
     void TryMigrateLegacyProgress();
     void RecordClearedLocation(const std::string& locationId);
     void SaveConnectionInfo() const;
+    void SaveLocalInt64(const std::string& name, int64_t value) const;
     void SaveLocalString(const std::string& name, const std::string& value) const;
     size_t SendMissingClearedLocations();
     void SaveLocalValue(const std::string& name, int32_t value) const;
@@ -104,6 +109,7 @@ class Archipelago {
     std::string slotName_;
     std::string password_;
     std::string localSavePrefix_;
+    std::string loadedLedgerPrefix_;
     int itemsHandling_ = 0b111;  // Send all received items, including starting inventory
 
     mutable std::string lastError_;
@@ -117,12 +123,15 @@ class Archipelago {
     bool receivedItemGrantPending_ = false;
     bool receivedProgressionInventoryReconciled_ = false;
     bool clearedLocationsLoaded_ = false;
+    bool itemLedgerLoaded_ = false;
     std::atomic_flag polling_ = ATOMIC_FLAG_INIT;
     std::chrono::steady_clock::time_point receivedItemRetryAt_{};
     uint64_t receivedItemGeneration_ = 0;
 
     std::map<int64_t, APClient::NetworkItem> pendingReceivedItems_;
     std::map<int64_t, APClient::NetworkItem> receivedItems_;
+    std::map<int64_t, int64_t> observedItemIdsByIndex_;
+    std::unordered_map<int64_t, std::uint32_t> awardedItemCounts_;
     std::vector<std::string> clearedLocations_;
     json slotData_;
 

@@ -2,6 +2,11 @@
 
 #include <atomic>
 
+namespace SDK {
+class UObject;
+class UFunction;
+}  // namespace SDK
+
 class QualityOfLife {
    public:
     static QualityOfLife& Instance();
