@@ -33,6 +33,7 @@ long(__stdcall* Gui::originalPresent)(IDXGISwapChain*, unsigned int, unsigned in
 bool Gui::g_Hooked = false;
 
 static ID3D11ShaderResourceView* s_WallMarkerTexture = nullptr;
+static ID3D11ShaderResourceView* s_ShardMarkerTexture = nullptr;
 
 static ID3D11ShaderResourceView* LoadEmbeddedPngTexture(ID3D11Device* device, int resourceId) {
     if (!device) return nullptr;
@@ -419,6 +420,10 @@ bool Gui::InitImGui(IDXGISwapChain* swapChain) {
     if (!s_WallMarkerTexture) {
         Logger::Log(LogLevel::Warning, "[Tracker] Failed to create the DX11 breakable-wall marker texture");
     }
+    s_ShardMarkerTexture = LoadEmbeddedPngTexture(m_Device, IDR_SHARD_MARKER_PNG);
+    if (!s_ShardMarkerTexture) {
+        Logger::Log(LogLevel::Warning, "[Tracker] Failed to create the DX11 shard marker texture");
+    }
 
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (SUCCEEDED(swapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
@@ -493,16 +498,21 @@ static void RenderMiniMapOverlay(const MiniMapOverlaySnapshot& snapshot) {
             continue;
         }
 
-        // The main-map shard brush is backed by an Unreal-owned dynamic item texture. Represent the same target
-        // distinctly in the external overlay without sharing that unsafe resource across renderers.
+        if (s_ShardMarkerTexture) {
+            drawList->AddImage(ImTextureID(reinterpret_cast<intptr_t>(s_ShardMarkerTexture)), ImVec2(left, top),
+                               ImVec2(right, bottom));
+            continue;
+        }
+
+        // Resource-load fallback: preserve a distinct green shard silhouette.
         const ImVec2 topPoint{centerX, top};
         const ImVec2 rightPoint{right, centerY};
         const ImVec2 bottomPoint{centerX, bottom};
         const ImVec2 leftPoint{left, centerY};
-        drawList->AddQuadFilled(topPoint, rightPoint, bottomPoint, leftPoint, IM_COL32(235, 55, 255, 255));
+        drawList->AddQuadFilled(topPoint, rightPoint, bottomPoint, leftPoint, IM_COL32(54, 224, 92, 255));
         drawList->AddTriangleFilled(topPoint, rightPoint, ImVec2(centerX, centerY),
-                                    IM_COL32(255, 155, 255, 255));
-        drawList->AddQuad(topPoint, rightPoint, bottomPoint, leftPoint, IM_COL32(70, 5, 85, 255), 2.0f);
+                                    IM_COL32(150, 255, 175, 255));
+        drawList->AddQuad(topPoint, rightPoint, bottomPoint, leftPoint, IM_COL32(8, 75, 25, 255), 2.0f);
     }
     drawList->PopClipRect();
 }
@@ -598,6 +608,10 @@ void Gui::Shutdown() {
     if (s_WallMarkerTexture) {
         s_WallMarkerTexture->Release();
         s_WallMarkerTexture = nullptr;
+    }
+    if (s_ShardMarkerTexture) {
+        s_ShardMarkerTexture->Release();
+        s_ShardMarkerTexture = nullptr;
     }
     if (m_ImGuiInit) {
         ImGui_ImplDX11_Shutdown();

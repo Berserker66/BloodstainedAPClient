@@ -1,7 +1,5 @@
 #include "InGameTracker.h"
 
-#include <CommonItemIcon_classes.hpp>
-#include <CommonItemIcon_parameters.hpp>
 #include <Engine_classes.hpp>
 #include <MapLocationBlueprint_classes.hpp>
 #include <MapManageBlueprint_classes.hpp>
@@ -137,35 +135,6 @@ void SetImageColor(SDK::UImage* image, const SDK::FLinearColor& color) {
     function->FunctionFlags |= 0x400;
     image->ProcessEvent(function, &parameters);
     function->FunctionFlags = flags;
-}
-
-std::optional<SDK::FSlateBrush> CreateShardMarkerBrush(SDK::UObject* worldContext) {
-    auto* player = GameManager::Instance().Player();
-    if (!player || !player->CharacterInventory) return std::nullopt;
-
-    SDK::FPBItemCatalogData shardData{};
-    player->CharacterInventory->GetItemDataById(NameFromString("SummonDurahanMaHead"), &shardData);
-    if (shardData.ID.ToString().empty()) return std::nullopt;
-
-    static SDK::UFunction* createFunction =
-        SDK::UWidgetBlueprintLibrary::StaticClass()->GetFunction("WidgetBlueprintLibrary", "Create");
-    SDK::Params::WidgetBlueprintLibrary_Create createParameters{};
-    createParameters.WorldContextObject = worldContext;
-    createParameters.WidgetType = SDK::UCommonItemIcon_C::StaticClass();
-    createParameters.OwningPlayer = GameManager::Instance().PlayerController();
-    const auto createFlags = createFunction->FunctionFlags;
-    createFunction->FunctionFlags |= 0x400;
-    SDK::UWidgetBlueprintLibrary::GetDefaultObj()->ProcessEvent(createFunction, &createParameters);
-    createFunction->FunctionFlags = createFlags;
-
-    auto* widget = static_cast<SDK::UCommonItemIcon_C*>(createParameters.ReturnValue);
-    if (!widget) return std::nullopt;
-    static SDK::UFunction* setIconFunction = widget->Class->GetFunction("CommonItemIcon_C", "SetIconByData");
-    SDK::Params::CommonItemIcon_C_SetIconByData setIconParameters{};
-    setIconParameters.Input = shardData;
-    widget->ProcessEvent(setIconFunction, &setIconParameters);
-    if (!widget->icon) return std::nullopt;
-    return widget->icon->Brush;
 }
 
 void SetImageBrush(SDK::UImage* image, const SDK::FSlateBrush& brush) {
@@ -1402,7 +1371,8 @@ MiniMapRenderResult RenderMiniMapTracker(
         ++result.walls;
     }
 
-    const auto shardBrush = reachableShardRooms.empty() ? std::nullopt : CreateShardMarkerBrush(miniMap);
+    auto* shardMarkerTexture =
+        reachableShardRooms.empty() ? nullptr : CreateEmbeddedTexture(miniMap, IDR_SHARD_MARKER_PNG, "shard marker");
     for (const std::string& roomName : reachableShardRooms) {
         const auto* room = Tracker::FindRoom(roomName);
         if (!room || room->out_of_map) continue;
@@ -1414,10 +1384,9 @@ MiniMapRenderResult RenderMiniMapTracker(
                                     TransformMiniMapPosition(*markerCenter, *layerTransform),
                                     generatedMarkerSize, markerZOrder);
         if (!image) continue;
-        if (shardBrush) SetImageBrush(image, *shardBrush);
-        const SDK::FLinearColor markerColor =
-            shardBrush ? SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f}
-                       : SDK::FLinearColor{1.0f, 0.15f, 0.8f, 1.0f};
+        if (shardMarkerTexture) SetImageTexture(image, shardMarkerTexture);
+        const SDK::FLinearColor markerColor = shardMarkerTexture ? SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f}
+                                                                : SDK::FLinearColor{0.2f, 0.9f, 0.35f, 1.0f};
         SetImageColor(image, markerColor);
         image->Brush.DrawAs = SDK::ESlateBrushDrawType::Image;
         image->Brush.ImageSize = generatedMarkerSize;
@@ -1768,7 +1737,8 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
         treasureMarkers++;
     }
 
-    const auto shardMarkerBrush = enemyByRoom.empty() ? std::nullopt : CreateShardMarkerBrush(map);
+    auto* shardMarkerTexture =
+        enemyByRoom.empty() ? nullptr : CreateEmbeddedTexture(map, IDR_SHARD_MARKER_PNG, "shard marker");
     std::size_t roomMarkers = 0;
     for (const auto& markerEntry : map->RoomMarkerMap) {
         std::string roomId = markerEntry.Key().ToString();
@@ -1781,9 +1751,9 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
         auto enemy = enemyByRoom.find(roomId);
         if (enemy != enemyByRoom.end()) {
             marker->EnemyType = NameFromString(enemy->second);
-            if (shardMarkerBrush) SetImageBrush(marker->Image_71, *shardMarkerBrush);
-            SetImageColor(marker->Image_71, shardMarkerBrush ? SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f}
-                                                           : SDK::FLinearColor{1.0f, 0.15f, 0.8f, 1.0f});
+            if (shardMarkerTexture) SetImageTexture(marker->Image_71, shardMarkerTexture);
+            SetImageColor(marker->Image_71, shardMarkerTexture ? SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f}
+                                                              : SDK::FLinearColor{0.2f, 0.9f, 0.35f, 1.0f});
         }
         roomMarkers++;
     }

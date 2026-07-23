@@ -254,6 +254,7 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\chest-marker.png" />
+    <Image Include="Assets\shard-marker.png" />
     <Image Include="Assets\wall-marker.png" />
     <ResourceCompile Include="BloodstainedAP.rc" />
   </ItemGroup>

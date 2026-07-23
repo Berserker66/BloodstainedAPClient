@@ -2,3 +2,4 @@
 
 IDR_WALL_MARKER_PNG RCDATA "Assets/wall-marker.png"
 IDR_CHEST_MARKER_PNG RCDATA "Assets/chest-marker.png"
+IDR_SHARD_MARKER_PNG RCDATA "Assets/shard-marker.png"
