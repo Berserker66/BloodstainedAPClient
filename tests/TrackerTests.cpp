@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "EnemyDropShuffleLogic.h"
 #include "QualityOfLifeLogic.h"
 #include "Tracker.h"
 #include "TrackerRuleEvaluator.h"
@@ -209,6 +210,53 @@ void TestGalleonOpeningHeightGate() {
           "Double Jump opens both chests above the Galleon spawn");
 }
 
+std::uint64_t HashDropShuffle(const bloodstained::enemy_drop_shuffle::ShuffleResult& result) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto& enemy : result.enemies) {
+        for (const char character : enemy.enemy) {
+            hash = (hash ^ static_cast<unsigned char>(character)) * 1099511628211ull;
+        }
+        for (std::size_t slot = 0; slot < enemy.items.size(); ++slot) {
+            hash = (hash ^ static_cast<std::uint64_t>(enemy.active[slot])) * 1099511628211ull;
+            if (!enemy.active[slot]) continue;
+            for (const char character : enemy.items[slot]) {
+                hash = (hash ^ static_cast<unsigned char>(character)) * 1099511628211ull;
+            }
+        }
+    }
+    return hash;
+}
+
+void TestEnemyDropShuffle() {
+    const auto firstSlotSeed = bloodstained::enemy_drop_shuffle::DeriveSeed("Seed123", 7);
+    Check(firstSlotSeed == 1062718794u, "drop seed derivation matches its stable test vector");
+    Check(firstSlotSeed == bloodstained::enemy_drop_shuffle::DeriveSeed("Seed123", 7),
+          "drop seed is stable for a room seed and slot");
+    Check(firstSlotSeed != bloodstained::enemy_drop_shuffle::DeriveSeed("Seed123", 8),
+          "drop seed changes for a different slot");
+    Check(firstSlotSeed != bloodstained::enemy_drop_shuffle::DeriveSeed("Seed124", 7),
+          "drop seed changes for a different room seed");
+
+    auto generate = [](std::uint32_t seed) {
+        return bloodstained::enemy_drop_shuffle::Generate(
+            [state = seed](std::uint32_t maxExclusive) mutable {
+                state = state * 1664525u + 1013904223u;
+                return state % maxExclusive;
+            });
+    };
+
+    const auto first = generate(0x12345678u);
+    const auto repeated = generate(0x12345678u);
+    const auto different = generate(0x87654321u);
+    Check(first.coversVanillaDrops, "enemy drop shuffle preserves every vanilla enemy drop");
+    Check(first.enemies.size() == std::size(bloodstained::enemy_drop_data::ELIGIBLE_ENEMIES),
+          "enemy drop shuffle covers every eligible enemy");
+    Check(HashDropShuffle(first) == HashDropShuffle(repeated),
+          "enemy drop shuffle is deterministic for a fixed RNG stream");
+    Check(HashDropShuffle(first) != HashDropShuffle(different),
+          "enemy drop shuffle changes for a different RNG stream");
+}
+
 }  // namespace
 
 int main() {
@@ -217,6 +265,7 @@ int main() {
     TestRealSnapshot();
     TestGeneratedMapData();
     TestGalleonOpeningHeightGate();
+    TestEnemyDropShuffle();
     if (failures != 0) {
         std::cerr << failures << " tracker test(s) failed\n";
         return 1;

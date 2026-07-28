@@ -15,6 +15,8 @@
 #include <utility>
 
 #include "ClientVersion.h"
+#include "EnemyDropShuffle.h"
+#include "EnemyDropShuffleLogic.h"
 #include "GameManager.h"
 #include "HookManager.h"
 #include "InGameTracker.h"
@@ -43,6 +45,8 @@ const std::string ITEM_LEDGER_OBSERVED_COUNT_VALUE = "ItemLedgerObservedCount";
 const std::string ITEM_LEDGER_AWARDED_COUNT_VALUE = "ItemLedgerAwardedCount";
 const std::string CONNECTION_SAVE_PREFIX = "AP_LastConnection_";
 const std::string CLEARED_LOCATION_SAVE_PREFIX = "AP_ClearedLocation_";
+const std::string ENEMY_DROP_SHUFFLE_SEED_VALUE = "AP_EnemyDropShuffleSeed";
+const std::string ENEMY_DROP_SHUFFLE_VERSION_VALUE = "AP_EnemyDropShuffleVersion";
 const int32_t CONNECTION_SAVE_VERSION = 1;
 const int32_t ITEM_LEDGER_VERSION = 1;
 const int32_t MAX_ITEM_LEDGER_ENTRIES = 4096;
@@ -371,6 +375,39 @@ void Archipelago::SaveConnectionInfo() const {
     SaveLocalValue(CONNECTION_SAVE_PREFIX + "DeathLink", wantsDeathlink_ ? 1 : 0);
     SaveLocalValue(CONNECTION_SAVE_PREFIX + "Version", CONNECTION_SAVE_VERSION);
     Logger::Log("[AP] Saved successful connection info to the current save");
+}
+
+void Archipelago::ApplySavedEnemyDropShuffle() {
+    // The drop data table can survive a trip through the title screen. Restore
+    // the PAK-owned rows first so loading an older/non-AP save cannot inherit
+    // the previous save's slot-specific shuffle.
+    EnemyDropShuffle::Reset();
+    const auto seed = LoadSavedValue(ENEMY_DROP_SHUFFLE_SEED_VALUE);
+    const auto version = LoadSavedValue(ENEMY_DROP_SHUFFLE_VERSION_VALUE);
+    if (!seed || !version) return;
+
+    EnemyDropShuffle::Apply(static_cast<std::uint32_t>(*seed), *version);
+}
+
+bool Archipelago::ApplyConnectedEnemyDropShuffle(const std::string& seedName, std::uint32_t slotId) {
+    const int version = bloodstained::enemy_drop_shuffle::VERSION;
+    const std::uint32_t seed = bloodstained::enemy_drop_shuffle::DeriveSeed(seedName, slotId);
+    const auto savedSeed = LoadSavedValue(ENEMY_DROP_SHUFFLE_SEED_VALUE);
+    const auto savedVersion = LoadSavedValue(ENEMY_DROP_SHUFFLE_VERSION_VALUE);
+    if ((savedSeed && static_cast<std::uint32_t>(*savedSeed) != seed) ||
+        (savedVersion && *savedVersion != version)) {
+        Logger::Log(LogLevel::File,
+                    "[DropShuffle] Rebinding save to connected slot's shuffle; old seed:",
+                    savedSeed ? static_cast<std::uint32_t>(*savedSeed) : 0, "new seed:", seed);
+    }
+    Logger::Log(LogLevel::File, "[DropShuffle] Derived seed:", seed, "from room seed:",
+                seedName, "slot:", slotId);
+
+    // SetSavedValue writes into the active story-save object. The values reach
+    // disk on the player's next normal save.
+    SaveLocalValue(ENEMY_DROP_SHUFFLE_SEED_VALUE, static_cast<std::int32_t>(seed));
+    SaveLocalValue(ENEMY_DROP_SHUFFLE_VERSION_VALUE, version);
+    return EnemyDropShuffle::Apply(seed, version);
 }
 
 std::optional<ArchipelagoConnectionInfo> Archipelago::LoadSavedConnectionInfo() const {
@@ -983,6 +1020,12 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
         SendMissingClearedLocations();
         HookManager::ApplyCompatibilityShardMasterData();
         SaveConnectionInfo();
+
+        if (!ApplyConnectedEnemyDropShuffle(ap->get_seed(),
+                                            static_cast<std::uint32_t>(ap->get_player_number()))) {
+            GameManager::Instance().SendInGameNotification(
+                "Enemy drop shuffle could not be applied.", 1023);
+        }
 
         if (slotData.contains("drop_experience_multiplier") && !slotData.at("drop_experience_multiplier").is_null()) {
             auto value = slotData.at("drop_experience_multiplier").get<float>();

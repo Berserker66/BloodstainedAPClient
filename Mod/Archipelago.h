@@ -64,6 +64,7 @@ class Archipelago {
     void Poll();
     void Sync();
     void ResetLocalLocationCache();
+    void ApplySavedEnemyDropShuffle();
     std::optional<ArchipelagoConnectionInfo> LoadSavedConnectionInfo() const;
 
     LocationCheckResult SendLocationChecks(const std::string& locationId);
@@ -94,6 +95,7 @@ class Archipelago {
     void TryMigrateLegacyProgress();
     void RecordClearedLocation(const std::string& locationId);
     void SaveConnectionInfo() const;
+    bool ApplyConnectedEnemyDropShuffle(const std::string& seedName, std::uint32_t slotId);
     void SaveLocalInt64(const std::string& name, int64_t value) const;
     void SaveLocalString(const std::string& name, const std::string& value) const;
     size_t SendMissingClearedLocations();

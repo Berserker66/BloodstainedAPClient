@@ -377,6 +377,7 @@ bool HookManager::Init() {
         QualityOfLife::Instance().LoadSettings();
         InGameTracker::Instance().InvalidateReachability("save loaded");
         Archipelago::Instance().ResetLocalLocationCache();
+        Archipelago::Instance().ApplySavedEnemyDropShuffle();
         Gui::Instance().TryAutoConnect();
         APBridge::Instance().EnqueueSync();
         Logger::Log("Player respawned");

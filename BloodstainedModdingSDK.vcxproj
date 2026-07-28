@@ -188,6 +188,7 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     </ClCompile>
     <ClCompile Include="Mod\Archipelago.cpp" />
     <ClCompile Include="Mod\APBridge.cpp" />
+    <ClCompile Include="Mod\EnemyDropShuffle.cpp" />
     <ClCompile Include="Mod\GameManager.cpp" />
     <ClCompile Include="Mod\Gui.cpp" />
     <ClCompile Include="Mod\HookManager.cpp" />
@@ -234,6 +235,9 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
     <ClInclude Include="Mod\IToggleMod.h" />
     <ClInclude Include="Mod\Logger.h" />
     <ClInclude Include="Mod\ClientVersion.h" />
+    <ClInclude Include="Mod\EnemyDropData.generated.h" />
+    <ClInclude Include="Mod\EnemyDropShuffle.h" />
+    <ClInclude Include="Mod\EnemyDropShuffleLogic.h" />
     <ClInclude Include="Mod\MainMenuStatus.h" />
     <ClInclude Include="Mod\Resource.h" />
     <ClInclude Include="Mod\ModRunner.h" />
