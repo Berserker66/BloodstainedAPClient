@@ -21,6 +21,7 @@ struct TrackedWidgetHandle {
 };
 
 enum class MiniMapOverlayMarkerKind : std::uint8_t {
+    CHEST,
     WALL,
     SHARD,
 };
@@ -57,6 +58,8 @@ class InGameTracker {
     void MarkInventorySynchronized();
     void ObserveNativeItem(std::string_view itemName);
     void ObserveLocationCleared(std::string_view locationName);
+    void ObserveTreasureActor(void* actor);
+    void DiscoverLoadedTreasureActors();
     void ResetConnection();
     void SetDisplayMode(TrackerDisplayMode mode);
 
@@ -85,6 +88,7 @@ class InGameTracker {
     std::vector<TrackedWidgetHandle> miniMapVisibilityWidgets_;
     std::vector<TrackedWidgetHandle> spawnedMiniMapWidgets_;
     std::unordered_set<std::uint64_t> pendingWallLocationIds_;
+    std::unordered_set<std::string> pendingSyntheticTreasureIds_;
     std::unordered_set<std::uint64_t> miniMapWallLocationIds_;
     std::unordered_set<std::string> miniMapShardRooms_;
     std::unordered_set<std::string> miniMapTreasureIds_;

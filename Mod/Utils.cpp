@@ -6,17 +6,20 @@
 #include "SDK.hpp"
 #include "Windows.h"
 
-UC::FString FStringFromString(std::string string) {
-    static std::wstring wide;
-    wide = std::wstring(string.begin(), string.end());
-    UC::FString fstring(wide.c_str());
-    return fstring;
+UC::FString FStringFromString(const std::string& string) {
+    const std::wstring wide = Utf8ToWide(string);
+    return UC::FString(wide.c_str());
 }
 
 std::wstring Utf8ToWide(const std::string& str) {
-    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
-    std::wstring wide(size, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wide[0], size);
+    if (str.empty()) return {};
+
+    const int sourceSize = static_cast<int>(str.size());
+    const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.data(), sourceSize, nullptr, 0);
+    if (size <= 0) return std::wstring(str.begin(), str.end());
+
+    std::wstring wide(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str.data(), sourceSize, wide.data(), size);
     return wide;
 }
 

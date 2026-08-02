@@ -8,7 +8,7 @@ namespace ArchipelagoProtocol {
 
 inline constexpr int Major = 0;
 inline constexpr int Minor = 6;
-inline constexpr int Build = 5;
+inline constexpr int Build = 6;
 
 }  // namespace ArchipelagoProtocol
 

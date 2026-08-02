@@ -13,7 +13,7 @@
 
 namespace bloodstained::enemy_drop_shuffle {
 
-inline constexpr int VERSION = 1;
+inline constexpr int VERSION = 2;
 inline constexpr float DROP_RATE = 16.0f;
 
 inline std::uint32_t DeriveSeed(std::string_view seedName, std::uint32_t slotId) {

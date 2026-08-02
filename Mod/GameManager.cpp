@@ -56,6 +56,9 @@ bool GameManager::PopulateDisplayToItemIdTable() {
     for (auto& pair : itemTable->RowMap) {
         pair.Value();
         std::string itemId = pair.Key().ToString();
+        // Protocol bindings use authoritative native catalog IDs whenever one exists. Accepting identity
+        // mappings also keeps visually identical level variants distinct (their localized names are shared).
+        DisplayNameToItemId[itemId] = itemId;
         auto itemName = FNameFromString(itemId);
         SDK::FPBItemCatalogData itemData = SDK::FPBItemCatalogData();
 
@@ -108,7 +111,6 @@ bool GameManager::PostInit() {
     Sleep(200);
     ThreadQueue::Instance().Enqueue([this] { GameManager::Instance().PopulateDisplayToItemIdTable(); });
     // GameManager::Instance().PopulateDisplayToItemIdTable();
-    Logger::Log(DisplayNameToItemId["Knife"]);
     Logger::Log("Game Manager POST initialized successfully");
     postInitCompleted = true;
     return true;
@@ -261,6 +263,36 @@ std::optional<SDK::FPBItemCatalogData> GameManager::CheckAllInventories(const st
     return std::nullopt;
 }
 
+bool GameManager::UnlockEquipmentInShop(const std::string& itemName) {
+    auto* player = static_cast<SDK::APB_Chr_Root_C*>(Player());
+    if (!player || !player->CharacterInventory) return false;
+
+    constexpr int flyingEdgeBuyPrice = 10000;
+    constexpr int flyingEdgeSellPrice = 1000;
+    auto unlockIn = [&](SDK::TArray<SDK::FPBItemCatalogData>& items) {
+        for (auto& item : items) {
+            if (item.ID.ToString() != itemName) continue;
+
+            // Flying Edge is ordinary, consumable crafting equipment, but the base game
+            // gives it a zero shop price because it was never intended to be renewable.
+            if (itemName == "RemoteDart" && item.buyPrice <= 0) {
+                item.buyPrice = flyingEdgeBuyPrice;
+                item.sellPrice = flyingEdgeSellPrice;
+            }
+            if (item.buyPrice <= 0) return false;
+
+            item.IsCrafted = true;
+            return true;
+        }
+        return false;
+    };
+
+    auto* inventory = player->CharacterInventory;
+    return unlockIn(inventory->myWeapons) || unlockIn(inventory->myArmors) ||
+           unlockIn(inventory->myHeadGears) || unlockIn(inventory->myAccessories) ||
+           unlockIn(inventory->myMufflers);
+}
+
 bool GameManager::ItemHasItemCategory(const std::string& itemName, SDK::ECarriedCatalog category) {
     SDK::UPBGameInstance* inst = (SDK::UPBGameInstance*)GameManager::Instance().GameInstance();
     auto itemFName = FNameFromString(itemName);
@@ -325,6 +357,9 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
             Logger::Log(LogLevel::File, "[AP] Native item grant reported success without updating inventory:",
                         name, "previous count:", previousCount,
                         "current count:", itemAfterGrant ? itemAfterGrant->Num : 0);
+        }
+        if (nativeGrantAccepted && inventoryUpdated && gameManager.UnlockEquipmentInShop(name)) {
+            Logger::Log(LogLevel::File, "[AP] Unlocked received equipment in shop:", name);
         }
         if (completion) {
             completion(nativeGrantAccepted && inventoryUpdated ? ItemGrantResult::Granted : ItemGrantResult::Rejected);

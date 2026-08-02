@@ -85,6 +85,14 @@ std::vector<std::string_view> Tracker::GetReachableEnemyRooms(const generated::L
     return rooms;
 }
 
+std::optional<std::string_view> Tracker::FindNativeLocationName(std::uint64_t id) {
+    const auto binding = std::lower_bound(
+        generated::LOCATION_BINDINGS.begin(), generated::LOCATION_BINDINGS.end(), id,
+        [](const generated::IdentifierBinding& candidate, std::uint64_t value) { return candidate.id < value; });
+    if (binding == generated::LOCATION_BINDINGS.end() || binding->id != id) return std::nullopt;
+    return binding->native_name;
+}
+
 const generated::RoomMapData* Tracker::FindRoom(std::string_view name) {
     const auto room = std::lower_bound(generated::ROOMS.begin(), generated::ROOMS.end(), name,
                                        [](const generated::RoomMapData& candidate, std::string_view value) {

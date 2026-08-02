@@ -12,6 +12,7 @@
 #include "APBridge.h"
 #include "Archipelago.h"
 #include "GameManager.h"
+#include "HookManager.h"
 #include "InGameTracker.h"
 #include "Logger.h"
 #include "PBBronzeTreasureBox_BP_classes.hpp"
@@ -34,6 +35,7 @@ bool Gui::g_Hooked = false;
 
 static ID3D11ShaderResourceView* s_WallMarkerTexture = nullptr;
 static ID3D11ShaderResourceView* s_ShardMarkerTexture = nullptr;
+static ID3D11ShaderResourceView* s_ChestMarkerTexture = nullptr;
 
 static ID3D11ShaderResourceView* LoadEmbeddedPngTexture(ID3D11Device* device, int resourceId) {
     if (!device) return nullptr;
@@ -254,10 +256,12 @@ static void RenderQualityOfLifePanel() {
     if (ImGui::Checkbox("Auto-sell wasted shards", &autoSellWastedShards)) {
         ThreadQueue::Instance().Enqueue([autoSellWastedShards] {
             QualityOfLife::Instance().SetAutoSellWastedShardsEnabled(autoSellWastedShards);
+            HookManager::ApplyCompatibilityShardMasterData();
         });
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Automatically sell incoming shards that would exceed grade 9.");
+    ImGui::SetItemTooltip(
+        "Automatically sell repeated randomized shard drops and incoming shards that would exceed grade 9.");
 
     if (!saveLoaded) ImGui::TextDisabled("Load a save to change this setting.");
 }
@@ -424,6 +428,10 @@ bool Gui::InitImGui(IDXGISwapChain* swapChain) {
     if (!s_ShardMarkerTexture) {
         Logger::Log(LogLevel::Warning, "[Tracker] Failed to create the DX11 shard marker texture");
     }
+    s_ChestMarkerTexture = LoadEmbeddedPngTexture(m_Device, IDR_CHEST_MARKER_PNG);
+    if (!s_ChestMarkerTexture) {
+        Logger::Log(LogLevel::Warning, "[Tracker] Failed to create the DX11 chest marker texture");
+    }
 
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (SUCCEEDED(swapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer))) && pBackBuffer) {
@@ -474,6 +482,18 @@ static void RenderMiniMapOverlay(const MiniMapOverlaySnapshot& snapshot) {
         const float top = centerY - height * 0.5f;
         const float right = centerX + width * 0.5f;
         const float bottom = centerY + height * 0.5f;
+        if (marker.kind == MiniMapOverlayMarkerKind::CHEST) {
+            if (s_ChestMarkerTexture) {
+                drawList->AddImage(ImTextureID(reinterpret_cast<intptr_t>(s_ChestMarkerTexture)),
+                                   ImVec2(left, top), ImVec2(right, bottom));
+            } else {
+                drawList->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom),
+                                        IM_COL32(38, 217, 255, 255), 2.0f);
+                drawList->AddRect(ImVec2(left, top), ImVec2(right, bottom),
+                                  IM_COL32(8, 70, 82, 255), 2.0f, 0, 1.5f);
+            }
+            continue;
+        }
         if (marker.kind == MiniMapOverlayMarkerKind::WALL && s_WallMarkerTexture) {
             drawList->AddImage(ImTextureID(reinterpret_cast<intptr_t>(s_WallMarkerTexture)), ImVec2(left, top),
                                ImVec2(right, bottom));
@@ -612,6 +632,10 @@ void Gui::Shutdown() {
     if (s_ShardMarkerTexture) {
         s_ShardMarkerTexture->Release();
         s_ShardMarkerTexture = nullptr;
+    }
+    if (s_ChestMarkerTexture) {
+        s_ChestMarkerTexture->Release();
+        s_ChestMarkerTexture = nullptr;
     }
     if (m_ImGuiInit) {
         ImGui_ImplDX11_Shutdown();

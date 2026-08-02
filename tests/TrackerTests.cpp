@@ -68,6 +68,7 @@ void TestRuleEvaluator() {
 
 void TestExcessShardQuantity() {
     using bloodstained::qol::ExcessShardQuantity;
+    using bloodstained::qol::ShardSaleQuantity;
 
     Check(ExcessShardQuantity(8, 1) == 0, "grade 8 to 9 is not wasted");
     Check(ExcessShardQuantity(9, 1) == 1, "a shard received at grade 9 is wasted");
@@ -75,6 +76,13 @@ void TestExcessShardQuantity() {
     Check(ExcessShardQuantity(9, 3) == 3, "all copies received at grade 9 are wasted");
     Check(ExcessShardQuantity(9, 0) == 0, "zero incoming shards are ignored");
     Check(ExcessShardQuantity(9, -1) == 0, "negative incoming quantities are ignored");
+    Check(ShardSaleQuantity(8, 1, false) == 0, "ordinary grade 8 to 9 remains an inventory grant");
+    Check(ShardSaleQuantity(9, 1, false) == 1, "ordinary grade 9 to 10 is sold");
+    Check(ShardSaleQuantity(0, 1, true) == 1, "forced AP repeat is sold from grade 0");
+    Check(ShardSaleQuantity(8, 1, true) == 1, "forced AP repeat is sold from grade 8");
+    Check(ShardSaleQuantity(9, 1, true) == 1, "forced AP repeat is sold from grade 9");
+    Check(ShardSaleQuantity(0, 0, true) == 0, "forced sale ignores zero quantity");
+    Check(ShardSaleQuantity(0, -1, true) == 0, "forced sale ignores negative quantity");
 }
 
 constexpr std::array<std::string_view, 90> CHECKED_SNAPSHOT = {{
@@ -106,8 +114,35 @@ constexpr std::array<std::string_view, 90> CHECKED_SNAPSHOT = {{
 
 std::unordered_set<std::string_view> ReachableLocationNames(const Tracker& tracker, Difficulty difficulty) {
     std::unordered_set<std::string_view> names;
-    for (const auto* location : tracker.GetReachableLocations(difficulty)) names.insert(location->name);
+    for (const auto* location : tracker.GetReachableLocations(difficulty)) {
+        const auto binding = std::lower_bound(
+            bloodstained::tracker::generated::LOCATION_BINDINGS.begin(),
+            bloodstained::tracker::generated::LOCATION_BINDINGS.end(), location->id,
+            [](const auto& entry, std::uint64_t id) { return entry.id < id; });
+        if (binding == bloodstained::tracker::generated::LOCATION_BINDINGS.end() || binding->id != location->id) {
+            continue;
+        }
+        names.insert(binding->native_name);
+        if (binding->native_name.ends_with(".0")) {
+            names.insert(binding->native_name.substr(0, binding->native_name.size() - 2));
+        }
+    }
     return names;
+}
+
+const bloodstained::tracker::generated::LocationData* FindLocationByNativeName(std::string_view native_name) {
+    const auto binding = std::find_if(
+        bloodstained::tracker::generated::LOCATION_BINDINGS.begin(),
+        bloodstained::tracker::generated::LOCATION_BINDINGS.end(),
+        [native_name](const auto& entry) { return entry.native_name == native_name; });
+    if (binding == bloodstained::tracker::generated::LOCATION_BINDINGS.end()) return nullptr;
+    const auto location = std::lower_bound(
+        bloodstained::tracker::generated::LOCATIONS.begin(),
+        bloodstained::tracker::generated::LOCATIONS.end(), binding->id,
+        [](const auto& entry, std::uint64_t id) { return entry.id < id; });
+    return location != bloodstained::tracker::generated::LOCATIONS.end() && location->id == binding->id
+               ? &*location
+               : nullptr;
 }
 
 void TestRealSnapshot() {
@@ -153,6 +188,15 @@ void TestRealSnapshot() {
 }
 
 void TestGeneratedMapData() {
+    const auto oleanders_level_two = std::lower_bound(
+        bloodstained::tracker::generated::ITEM_BINDINGS.begin(),
+        bloodstained::tracker::generated::ITEM_BINDINGS.end(), 725676ull,
+        [](const auto& binding, std::uint64_t id) { return binding.id < id; });
+    Check(oleanders_level_two != bloodstained::tracker::generated::ITEM_BINDINGS.end() &&
+              oleanders_level_two->id == 725676ull &&
+              oleanders_level_two->native_name == "PoisonSpikeShoes2",
+          "levelled equipment protocol IDs bind to distinct native catalog rows");
+
     const auto* start_room = Tracker::FindRoom("m01SIP_000");
     Check(start_room != nullptr, "start room has minimap geometry");
     if (start_room != nullptr) {
@@ -179,11 +223,14 @@ void TestGeneratedMapData() {
     Check(std::ranges::any_of(reachable_rooms, [](const auto* room) { return room->name == "m01SIP_000"; }),
           "reachable-room projection contains the starting room");
 
-    const auto wall = std::find_if(
-        bloodstained::tracker::generated::LOCATIONS.begin(), bloodstained::tracker::generated::LOCATIONS.end(),
-        [](const auto& location) { return location.name == "Wall_SIP009_1"; });
-    Check(wall != bloodstained::tracker::generated::LOCATIONS.end(), "wall fixture exists");
-    if (wall != bloodstained::tracker::generated::LOCATIONS.end()) {
+    const auto* wall = FindLocationByNativeName("Wall_SIP009_1");
+    Check(wall != nullptr, "wall fixture exists");
+    if (wall != nullptr) {
+        const auto native_name = Tracker::FindNativeLocationName(wall->id);
+        Check(native_name && *native_name == "Wall_SIP009_1",
+              "canonical wall location resolves back to its native protocol name");
+        Check(native_name && wall->name != *native_name,
+              "player-facing wall name remains distinct from its native protocol name");
         Check(wall->type == bloodstained::tracker::generated::LocationType::WALL,
               "wall checks are exported separately from chests");
         Check(wall->map_x > 0.04f && wall->map_x < 0.05f,
@@ -191,6 +238,30 @@ void TestGeneratedMapData() {
         Check(wall->map_z > 1.66f && wall->map_z < 1.67f,
               "wall checks carry their room-local vertical map position");
     }
+
+    const auto* chest = FindLocationByNativeName("Treasurebox_SIP000_Tutorial.0");
+    Check(chest != nullptr, "chest fixture exists");
+    if (chest != nullptr) {
+        const auto native_name = Tracker::FindNativeLocationName(chest->id);
+        Check(native_name && *native_name == "Treasurebox_SIP000_Tutorial.0",
+              "canonical chest location resolves back to its native protocol name");
+    }
+
+    const auto* shard = FindLocationByNativeName("N3007_Shard");
+    Check(shard != nullptr, "shard fixture exists");
+    if (shard != nullptr) {
+        const auto native_name = Tracker::FindNativeLocationName(shard->id);
+        Check(native_name && *native_name == "N3007_Shard",
+              "canonical shard location resolves back to its native protocol name");
+    }
+    Check(!Tracker::FindNativeLocationName(0), "unknown location ID has no native protocol name");
+
+    const bool all_locations_have_native_names =
+        std::ranges::all_of(bloodstained::tracker::generated::LOCATIONS, [](const auto& location) {
+            return Tracker::FindNativeLocationName(location.id).has_value();
+        });
+    Check(all_locations_have_native_names,
+          "every player-facing tracker location resolves to a native protocol name");
 }
 
 void TestGalleonOpeningHeightGate() {

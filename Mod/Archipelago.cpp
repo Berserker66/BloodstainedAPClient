@@ -160,8 +160,8 @@ std::unordered_map<std::string, std::uint32_t> Archipelago::GetTrackerInventory(
     if (!ap || !IsConnected()) return inventory;
 
     for (const auto& [index, item] : receivedItems_) {
-        const auto itemName = GetNativeItemName(item.item);
-        if (itemName) inventory[std::string(*itemName)]++;
+        const std::string itemName = GetDisplayItemName(item.item);
+        if (!itemName.empty()) inventory[itemName]++;
     }
     return inventory;
 }
@@ -208,14 +208,13 @@ static LocationResolution ResolveLocation(const std::string& locationId, const s
     if (apLocationId && locationExistsInWorld(*apLocationId)) {
         resolution.exists = true;
         if (missingLocations.contains(*apLocationId)) resolution.missing.insert(*apLocationId);
-    } else {
-        for (int i = 0; i <= 3; i++) {
-            std::string fullLocation = locationWithoutPrefix + "." + std::to_string(i);
-            apLocationId = GetLocationId(fullLocation);
-            if (apLocationId && locationExistsInWorld(*apLocationId)) {
-                resolution.exists = true;
-                if (missingLocations.contains(*apLocationId)) resolution.missing.insert(*apLocationId);
-            }
+    }
+    for (int i = 0; i <= 3; i++) {
+        std::string fullLocation = locationWithoutPrefix + "." + std::to_string(i);
+        apLocationId = GetLocationId(fullLocation);
+        if (apLocationId && locationExistsInWorld(*apLocationId)) {
+            resolution.exists = true;
+            if (missingLocations.contains(*apLocationId)) resolution.missing.insert(*apLocationId);
         }
     }
     return resolution;
@@ -750,7 +749,7 @@ void Archipelago::ReconcileReceivedProgressionInventory() {
         const bool isNativeTraversal = std::any_of(
             bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.begin(),
             bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.end(),
-            [&itemName](const auto& traversalItem) { return traversalItem.item_name == itemName; });
+            [&itemName](const auto& traversalItem) { return traversalItem.native_id == itemName; });
         const bool isProgression = isNativeTraversal ||
                                    (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
         if ((!isShardOrSkill && !isProgression) || GameManager::Instance().CheckAllInventories(*itemId)) {
@@ -965,7 +964,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
             const bool isNativeTraversal = std::any_of(
                 bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.begin(),
                 bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS.end(),
-                [&itemName](const auto& traversalItem) { return traversalItem.item_name == itemName; });
+                [&itemName](const auto& traversalItem) { return traversalItem.native_id == itemName; });
             const bool isProgression = isNativeTraversal ||
                                        (item.flags & APClient::ItemFlags::FLAG_ADVANCEMENT) != 0;
             progressionChanged |= isProgression;

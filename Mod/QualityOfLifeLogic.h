@@ -11,4 +11,9 @@ constexpr int ExcessShardQuantity(int currentGrade, int incomingQuantity) {
     return std::max(0, currentGrade + incomingQuantity - MAX_SHARD_GRADE);
 }
 
+constexpr int ShardSaleQuantity(int currentGrade, int incomingQuantity, bool forceSale) {
+    if (incomingQuantity <= 0) return 0;
+    return forceSale ? incomingQuantity : ExcessShardQuantity(currentGrade, incomingQuantity);
+}
+
 }  // namespace bloodstained::qol

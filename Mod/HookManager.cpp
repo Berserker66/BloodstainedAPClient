@@ -294,7 +294,9 @@ void HookManager::ApplyCompatibilityShardMasterData() {
     if (!shardManager || !shardManager->ShardMasterTable) return;
     auto* dropManager = SDK::UPBDropManager::GetDropManager();
 
-    size_t patchedRows = 0;
+    const bool autoSellRepeatedShards = QualityOfLife::Instance().IsAutoSellWastedShardsEnabled();
+    size_t compatibilityRows = 0;
+    size_t unsuppressedDropRows = 0;
     for (const auto& [randomizedName, vanillaName] : knownVanillaShardIds) {
         SDK::FName vanillaShardId = FNameFromString(vanillaName);
         ItemLookupResult itemResult = GetVanillaShardItemSupport(*archipelago, vanillaShardId);
@@ -302,31 +304,37 @@ void HookManager::ApplyCompatibilityShardMasterData() {
             ResetCompatibilityShardMasterData();
             return;
         }
-        if (itemResult == ItemLookupResult::KnownItem) continue;
+        const bool needsCompatibility = itemResult == ItemLookupResult::UnknownItem;
 
-        auto* randomizedRow = FindShardMasterRow(shardManager->ShardMasterTable, randomizedName);
-        auto* vanillaRow = FindShardMasterRow(shardManager->ShardMasterTable, vanillaName);
-        if (!randomizedRow || !vanillaRow) continue;
+        if (needsCompatibility) {
+            auto* randomizedRow = FindShardMasterRow(shardManager->ShardMasterTable, randomizedName);
+            auto* vanillaRow = FindShardMasterRow(shardManager->ShardMasterTable, vanillaName);
+            if (randomizedRow && vanillaRow) {
+                originalRandomizedShardAppearances[randomizedName] =
+                    ShardAppearance{randomizedRow->ShardType, randomizedRow->ShardColorOverride};
+                randomizedRow->ShardType = vanillaRow->ShardType;
+                randomizedRow->ShardColorOverride = vanillaRow->ShardColorOverride == SDK::EShardColor::None
+                                                          ? DefaultShardColor(vanillaRow->ShardType)
+                                                          : vanillaRow->ShardColorOverride;
+                compatibilityRows++;
+            }
+        }
 
-        originalRandomizedShardAppearances[randomizedName] =
-            ShardAppearance{randomizedRow->ShardType, randomizedRow->ShardColorOverride};
-        randomizedRow->ShardType = vanillaRow->ShardType;
-        randomizedRow->ShardColorOverride = vanillaRow->ShardColorOverride == SDK::EShardColor::None
-                                                  ? DefaultShardColor(vanillaRow->ShardType)
-                                                  : vanillaRow->ShardColorOverride;
-
-        if (dropManager && dropManager->DropTable && randomizedName.starts_with("AP_")) {
+        if ((needsCompatibility || autoSellRepeatedShards) && dropManager && dropManager->DropTable &&
+            randomizedName.starts_with("AP_")) {
             std::string dropRowName = randomizedName.substr(3);
             auto* dropRow = FindDropMasterRow(dropManager->DropTable, dropRowName);
             if (dropRow) {
                 originalRandomizedDropFlags[dropRowName] = dropRow->DropSpecialFlags;
                 dropRow->DropSpecialFlags = SDK::EDropSpecialFlag::None;
+                unsuppressedDropRows++;
             }
         }
-        patchedRows++;
     }
 
-    Logger::Log("[Shard] Applied old-world compatibility to ", patchedRows, " shard rows");
+    Logger::Log(LogLevel::File, "[Shard] Applied shard table patches; compatibility rows:",
+                compatibilityRows, "unsuppressed drop rows:", unsuppressedDropRows,
+                "auto-sell repeats:", autoSellRepeatedShards);
 }
 
 bool HookManager::Init() {
@@ -365,6 +373,17 @@ bool HookManager::Init() {
     if (plsfStatus != MH_OK) {
         Logger::Log(LogLevel::Error, "plsf MH_EnableHook failed: ", (int)plsfStatus);
         return false;
+    }
+
+    // Register chest lifecycle observers as soon as ProcessEvent is hooked. PostInit deliberately waits for the
+    // player and HUD, by which time the streamed level containing a loaded save may already have constructed and
+    // begun play. ObserveTreasureActor safely defers native map registration until the HUD component exists.
+    const auto observeTreasure = [](void* obj) { InGameTracker::Instance().ObserveTreasureActor(obj); };
+    for (const char* className : {"PBEasyTreasureBox_BP_C", "PBPureMiriamTreasureBox_BP_C",
+                                  "PBBronzeTreasureBox_BP_C", "PBGoldenTreasureBox_BP_C",
+                                  "BP_ChaosTreasureBox_C"}) {
+        NotifyOnClassFunction(className, "UserConstructionScript", observeTreasure);
+        NotifyOnClassFunction(className, "ReceiveBeginPlay", observeTreasure);
     }
 
     // When game and player completely load in
@@ -507,6 +526,11 @@ bool HookManager::PostInit() {
         } else if (checkResult == LocationCheckResult::Sent) {
             instance().GivePlayerItem(shardName, false, 0);
             Logger::Log("[Shard] Sent location check:", shardName);
+        } else if (checkResult == LocationCheckResult::AlreadyChecked &&
+                   QualityOfLife::Instance().IsAutoSellWastedShardsEnabled()) {
+            QualityOfLife::Instance().SellRepeatedShardNow(*vanillaShardId);
+            Logger::Log(LogLevel::File, "[Shard] Sold repeated AP shard and suppressed actor:", shardName,
+                        "vanilla shard:", vanillaShardId->ToString());
         }
 
         ((SDK::AActor*)(shardBase))->K2_DestroyActor();

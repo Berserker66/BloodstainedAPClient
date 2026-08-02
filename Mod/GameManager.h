@@ -76,6 +76,7 @@ class GameManager {
     std::optional<SDK::FPBItemCatalogData> PlayerHasItem(const SDK::TArray<SDK::FPBItemCatalogData>& itemsArray,
                                                          const std::string& itemName);
     std::optional<SDK::FPBItemCatalogData> CheckAllInventories(const std::string& itemName);
+    bool UnlockEquipmentInShop(const std::string& itemName);
 
     bool CanKillPlayer();
     void KillPlayer();

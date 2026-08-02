@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -28,6 +29,7 @@ class Tracker {
         Difficulty difficulty, const std::unordered_set<std::uint64_t>& missingLocations) const;
     std::vector<std::string_view> GetReachableEnemyRooms(const generated::LocationData& location,
                                                          Difficulty difficulty) const;
+    static std::optional<std::string_view> FindNativeLocationName(std::uint64_t id);
     static const generated::RoomMapData* FindRoom(std::string_view name);
     static bool IsRoomCellVisible(const generated::RoomMapData& room, std::uint32_t roomAssignment);
     static bool IsTraversalItem(std::string_view name);

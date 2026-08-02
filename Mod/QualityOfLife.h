@@ -3,6 +3,7 @@
 #include <atomic>
 
 namespace SDK {
+class FName;
 class UObject;
 class UFunction;
 }  // namespace SDK
@@ -15,6 +16,7 @@ class QualityOfLife {
     void LoadSettings();
     void SetAutoSellWastedShardsEnabled(bool enabled);
 
+    void SellRepeatedShardNow(const SDK::FName& vanillaShardId);
     void ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, void* params);
 
    private:
