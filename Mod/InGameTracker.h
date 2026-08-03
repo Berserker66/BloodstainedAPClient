@@ -58,8 +58,6 @@ class InGameTracker {
     void MarkInventorySynchronized();
     void ObserveNativeItem(std::string_view itemName);
     void ObserveLocationCleared(std::string_view locationName);
-    void ObserveTreasureActor(void* actor);
-    void DiscoverLoadedTreasureActors();
     void ResetConnection();
     void SetDisplayMode(TrackerDisplayMode mode);
 

@@ -92,6 +92,7 @@ class Archipelago {
     void PersistObservedItemLedger() const;
     void UpdateObservedItemLedger();
     void ReconcileReceivedProgressionInventory();
+    void ReconcileCompletedBossShardLocations();
     void TryMigrateLegacyProgress();
     void RecordClearedLocation(const std::string& locationId);
     void SaveConnectionInfo() const;

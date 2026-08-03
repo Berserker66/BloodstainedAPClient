@@ -194,8 +194,28 @@ void TestGeneratedMapData() {
         [](const auto& binding, std::uint64_t id) { return binding.id < id; });
     Check(oleanders_level_two != bloodstained::tracker::generated::ITEM_BINDINGS.end() &&
               oleanders_level_two->id == 725676ull &&
-              oleanders_level_two->native_name == "PoisonSpikeShoes2",
+              oleanders_level_two->native_name == "PoisonSpikeShoes2" &&
+              oleanders_level_two->display_name == "Oleanders Lv2",
           "levelled equipment protocol IDs bind to distinct native catalog rows");
+
+    std::unordered_set<std::uint64_t> item_ids;
+    std::unordered_set<std::string_view> item_native_names;
+    std::unordered_set<std::string_view> item_display_names;
+    for (const auto& binding : bloodstained::tracker::generated::ITEM_BINDINGS) {
+        Check(!binding.native_name.empty(), "every AP item has a native identifier");
+        Check(!binding.display_name.empty(), "every AP item has a display-name alias");
+        Check(item_ids.insert(binding.id).second, "AP item protocol IDs are unique");
+        Check(item_native_names.insert(binding.native_name).second, "AP native item identifiers are unique");
+        Check(item_display_names.insert(binding.display_name).second, "AP item display names are unique");
+    }
+
+    const auto ribbon = std::lower_bound(
+        bloodstained::tracker::generated::ITEM_BINDINGS.begin(),
+        bloodstained::tracker::generated::ITEM_BINDINGS.end(), 725823ull,
+        [](const auto& binding, std::uint64_t id) { return binding.id < id; });
+    Check(ribbon != bloodstained::tracker::generated::ITEM_BINDINGS.end() &&
+              ribbon->native_name == "ribbon" && ribbon->display_name == "Ribbon",
+          "Ribbon binds to its case-sensitive native catalog identifier");
 
     const auto* start_room = Tracker::FindRoom("m01SIP_000");
     Check(start_room != nullptr, "start room has minimap geometry");

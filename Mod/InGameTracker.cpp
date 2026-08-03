@@ -40,6 +40,9 @@ using bloodstained::tracker::Tracker;
 using bloodstained::tracker::generated::LocationType;
 
 constexpr std::string_view TRACKER_DISPLAY_MODE_SAVE_KEY = "AP_TrackerDisplayMode";
+// Opt-in troubleshooting for native/AP chest identity and placement. Keep disabled in release builds; unlike the
+// discarded global object scans, this only inspects the current room when the minimap target set is rebuilt.
+constexpr bool ENABLE_TRACKER_DIAGNOSTICS = false;
 // The minimap collectible prototype publishes plain pixel rectangles to the DX11 Present hook. It never creates,
 // reparents, borrows, or registers Unreal widgets, so the Blueprint remains the sole owner of its marker arrays.
 // Render collectible targets outside the Blueprint-owned minimap marker arrays.
@@ -90,25 +93,6 @@ std::string NormalizeTreasureId(std::string treasureId) {
     return treasureId;
 }
 
-struct RegisteredTreasureData {
-    SDK::FName roomId;
-    SDK::FVector worldPosition;
-    SDK::int32 cellX = 0;
-    SDK::int32 cellZ = 0;
-    float cellRateX = 0.5f;
-    float cellRateZ = 0.5f;
-    bool hasStableRoomOffset = false;
-};
-
-std::unordered_map<std::string, RegisteredTreasureData> REGISTERED_TREASURES;
-
-struct TrackedTreasureActor {
-    void* pointer = nullptr;
-    SDK::int32 objectIndex = -1;
-};
-
-std::vector<TrackedTreasureActor> OBSERVED_TREASURE_ACTORS;
-
 SDK::FName NameFromString(std::string_view value);
 
 const bloodstained::tracker::generated::LocationData* FindChestLocationByNativeId(
@@ -122,120 +106,9 @@ const bloodstained::tracker::generated::LocationData* FindChestLocationByNativeI
     return nullptr;
 }
 
-bool IsTreasureObject(SDK::UObject* object) {
-    if (!object || !object->Class) return false;
-    for (auto* type = static_cast<SDK::UStruct*>(object->Class); type; type = type->SuperStruct) {
-        const std::string typeName = type->Name.ToString();
-        if (typeName == "PBEasyTreasureBox_BP_C" || typeName == "PBPureMiriamTreasureBox_BP_C" ||
-            typeName == "PBBronzeTreasureBox_BP_C" || typeName == "PBGoldenTreasureBox_BP_C" ||
-            typeName == "BP_ChaosTreasureBox_C") {
-            return true;
-        }
-    }
-    return false;
-}
-
-SDK::UProperty* FindObjectProperty(SDK::UObject* object, std::string_view propertyName) {
-    if (!object || !object->Class) return nullptr;
-    for (auto* type = static_cast<SDK::UStruct*>(object->Class); type; type = type->SuperStruct) {
-        for (auto* field = type->Children; field; field = field->Next) {
-            if (field->Name.ToString() != propertyName || !field->IsA(SDK::UProperty::StaticClass())) continue;
-            return static_cast<SDK::UProperty*>(field);
-        }
-    }
-    return nullptr;
-}
-
-template <typename T>
-T* GetObjectPropertyValue(SDK::UObject* object, std::string_view propertyName) {
-    auto* property = FindObjectProperty(object, propertyName);
-    if (!property || property->Offset < 0 || property->Offset + sizeof(T) > object->Class->Size) return nullptr;
-    return reinterpret_cast<T*>(reinterpret_cast<std::byte*>(object) + property->Offset);
-}
-
-std::optional<bool> GetObjectBoolProperty(SDK::UObject* object, std::string_view propertyName) {
-    auto* property = FindObjectProperty(object, propertyName);
-    if (!property || !property->IsA(SDK::UBoolProperty::StaticClass())) return std::nullopt;
-    auto* boolProperty = static_cast<SDK::UBoolProperty*>(property);
-    if (property->Offset < 0 || property->Offset + boolProperty->ByteOffset >= object->Class->Size) {
-        return std::nullopt;
-    }
-    const auto* value = reinterpret_cast<const std::uint8_t*>(object) + property->Offset + boolProperty->ByteOffset;
-    return (*value & boolProperty->ByteMask) != 0;
-}
-
-std::optional<std::string> GetApTreasureId(SDK::UObject* chest) {
-    const auto decode = [](std::string id) -> std::optional<std::string> {
-        if (id.starts_with("AP_Treasurebox_")) id.erase(0, 3);
-        if (!id.starts_with("Treasurebox_")) return std::nullopt;
-        if (id.size() >= 2 && id[id.size() - 2] == '.' &&
-            std::isdigit(static_cast<unsigned char>(id.back()))) {
-            id.resize(id.size() - 2);
-        }
-        return id;
-    };
-
-    for (const std::string_view propertyName : {"DropItemID", "ItemID"}) {
-        auto* itemId = GetObjectPropertyValue<SDK::FName>(chest, propertyName);
-        if (itemId) {
-            if (auto id = decode(itemId->ToString())) return id;
-        }
-    }
-    return std::nullopt;
-}
-
-bool ProcessObservedTreasureActors() {
-    auto* playerController = GameManager::Instance().PlayerController();
-    auto* hud = playerController ? static_cast<SDK::APBInterfaceHUD*>(playerController->MyHUD) : nullptr;
-    auto* treasureComponent = hud ? hud->m_MapTreasureIconComponent : nullptr;
-    if (!treasureComponent) return false;
-
-    const std::size_t previousCount = REGISTERED_TREASURES.size();
-    std::size_t actors = 0;
-    std::size_t apActors = 0;
-    std::erase_if(OBSERVED_TREASURE_ACTORS, [](const TrackedTreasureActor& handle) {
-        if (!handle.pointer || handle.objectIndex < 0) return true;
-        auto* object = SDK::UObject::GObjects->GetByIndex(handle.objectIndex);
-        return object != handle.pointer || !object->Class || !SDK::UKismetSystemLibrary::IsValid(object);
-    });
-    for (const auto& handle : OBSERVED_TREASURE_ACTORS) {
-        auto* object = static_cast<SDK::UObject*>(handle.pointer);
-        ++actors;
-
-        const auto apTreasureId = GetApTreasureId(object);
-        if (!apTreasureId) continue;
-        const std::string treasureId = NormalizeTreasureId(*apTreasureId);
-        const auto* location = FindChestLocationByNativeId(treasureId);
-        if (!location) continue;
-        const SDK::FVector worldPosition = static_cast<SDK::AActor*>(object)->K2_GetActorLocation();
-        auto [registered, inserted] = REGISTERED_TREASURES.try_emplace(
-            treasureId, RegisteredTreasureData{NameFromString(location->room), worldPosition});
-        registered->second.roomId = NameFromString(location->room);
-        registered->second.worldPosition = worldPosition;
-        ++apActors;
-
-    }
-    if (REGISTERED_TREASURES.size() != previousCount) {
-        Logger::Log(LogLevel::File, "[Tracker] Captured loaded AP chest actors:", apActors,
-                    "loaded actors:", actors, "total cached positions:", REGISTERED_TREASURES.size());
-    }
-
-    return false;
-}
-
-std::unordered_map<std::string, RegisteredTreasureData*> GetRegisteredTreasureData(
-    const std::unordered_set<std::string>& requestedTreasureIds) {
-    std::unordered_map<std::string, RegisteredTreasureData*> result;
-    if (requestedTreasureIds.empty()) return result;
-
-    // TreasureList is not parallel with m_KeyArray/m_DataArray: it retains names while the latter arrays contain
-    // only the currently registered actors. Loaded chest actors retain both the AP location ID and exact world
-    // position even when the map Blueprint elects not to create a native marker widget.
-    for (const auto& treasureId : requestedTreasureIds) {
-        const auto registered = REGISTERED_TREASURES.find(treasureId);
-        if (registered != REGISTERED_TREASURES.end()) result.emplace(treasureId, &registered->second);
-    }
-    return result;
+bool HasAuthoritativeChestPosition(std::string_view normalizedNativeId) {
+    const auto* location = FindChestLocationByNativeId(normalizedNativeId);
+    return location && location->has_map_position;
 }
 
 SDK::FName NameFromString(std::string_view value) {
@@ -294,6 +167,79 @@ void SetImageBrush(SDK::UImage* image, const SDK::FSlateBrush& brush) {
     function->FunctionFlags |= 0x400;
     image->ProcessEvent(function, &parameters);
     function->FunctionFlags = flags;
+}
+
+struct NativeImageBrushOverride {
+    TrackedWidgetHandle image;
+    SDK::FSlateBrush nativeBrush;
+};
+
+std::vector<NativeImageBrushOverride> MAIN_MAP_NATIVE_BRUSH_OVERRIDES;
+std::vector<NativeImageBrushOverride> MINI_MAP_NATIVE_BRUSH_OVERRIDES;
+SDK::int32 RECONCILED_TREASURE_COMPONENT_INDEX = -1;
+std::unordered_set<std::string> RECONCILED_FINISHED_TREASURE_IDS;
+
+void RememberNativeImageBrush(std::vector<NativeImageBrushOverride>& overrides, SDK::UImage* image) {
+    if (!image) return;
+    const auto handle = TrackWidget(image);
+    const auto existing = std::find_if(overrides.begin(), overrides.end(), [&](const auto& entry) {
+        return entry.image.objectIndex == handle.objectIndex;
+    });
+    if (existing == overrides.end()) overrides.push_back({handle, image->Brush});
+}
+
+void RestoreNativeImageBrushes(std::vector<NativeImageBrushOverride>& overrides) {
+    for (const auto& entry : overrides) {
+        if (auto* image = static_cast<SDK::UImage*>(ResolveWidget(entry.image))) {
+            SetImageBrush(image, entry.nativeBrush);
+        }
+    }
+    overrides.clear();
+}
+
+std::size_t ReconcileFinishedTreasureMarkers(Archipelago* archipelago) {
+    if (!archipelago) return 0;
+    auto* playerController = GameManager::Instance().PlayerController();
+    auto* hud = playerController ? static_cast<SDK::APBInterfaceHUD*>(playerController->MyHUD) : nullptr;
+    auto* treasureComponent = hud ? hud->m_MapTreasureIconComponent : nullptr;
+    if (!treasureComponent) return 0;
+
+    if (RECONCILED_TREASURE_COMPONENT_INDEX != treasureComponent->Index) {
+        RECONCILED_TREASURE_COMPONENT_INDEX = treasureComponent->Index;
+        RECONCILED_FINISHED_TREASURE_IDS.clear();
+    }
+
+    std::vector<std::pair<SDK::FName, SDK::FVector2D>> finishedLocations;
+    for (const auto& entry : treasureComponent->TreasureMarkerMapLocation) {
+        const std::string treasureId = entry.Key().ToString();
+        if (RECONCILED_FINISHED_TREASURE_IDS.contains(NormalizeTreasureId(treasureId)) ||
+            !archipelago->WasLocationClearedLocally(treasureId)) {
+            continue;
+        }
+        finishedLocations.emplace_back(entry.Key(), entry.Value());
+    }
+
+    for (const auto& [treasureId, location] : finishedLocations) {
+        treasureComponent->AddTreasureLocation(treasureId, location, true);
+        RECONCILED_FINISHED_TREASURE_IDS.insert(NormalizeTreasureId(treasureId.ToString()));
+    }
+    if (!finishedLocations.empty()) {
+        Logger::Log(LogLevel::File, "[Tracker] Reconciled native finished state for",
+                    finishedLocations.size(), "locally cleared AP treasure markers");
+    }
+    return finishedLocations.size();
+}
+
+template <typename MarkerArray>
+void SuppressFinishedTreasureMarkers(const MarkerArray& markers) {
+    for (auto* marker : markers) {
+        if (!marker ||
+            !RECONCILED_FINISHED_TREASURE_IDS.contains(NormalizeTreasureId(marker->treasureID.ToString()))) {
+            continue;
+        }
+        SetCollapsed(marker->Image_30);
+        SetCollapsed(marker);
+    }
 }
 
 SDK::UTexture2D* CreateEmbeddedTexture(SDK::UObject* worldContext, int resourceId, std::string_view description) {
@@ -453,42 +399,15 @@ struct NativeMapAxes {
     SDK::FVector2D z;
 };
 
-std::optional<SDK::FVector2D> GetStableTreasureMapPosition(
-    SDK::UPBMapManager* mapManager,
-    SDK::UPBMapComponent* mapComponent,
-    SDK::EDivideMap mapType,
-    SDK::UTotalMapBlueprint_C* totalMap,
-    RegisteredTreasureData& treasure,
-    const NativeMapAxes& axes) {
-    if (!mapManager || !mapComponent || !totalMap) return std::nullopt;
-    const SDK::FName& roomId = treasure.roomId;
-    const auto* room = Tracker::FindRoom(roomId.ToString());
-    if (!room || room->out_of_map || room->width == 0 || room->height == 0) return std::nullopt;
+constexpr float WALL_MARKER_Z_OFFSET = 0.25f;
 
-    // GetCurrentRoomOffset, despite taking a RoomID, applies the active streamed room's transform. Learn its
-    // normalized result only while the chest's own room is current and retain it after that room unloads.
-    if (!treasure.hasStableRoomOffset) {
-        auto* roomManager = SDK::UPBRoomManager::GetRoomManager();
-        if (!roomManager || roomManager->GetCurrentRoomId().ToString() != roomId.ToString()) return std::nullopt;
-        if (!mapManager->GetCurrentRoomOffset(roomId, treasure.worldPosition, &treasure.cellX, &treasure.cellZ,
-                                              &treasure.cellRateX, &treasure.cellRateZ)) {
-            return std::nullopt;
-        }
-        treasure.hasStableRoomOffset = true;
-        Logger::Log(LogLevel::File, "[Tracker] Learned stable chest room offset; room:", roomId.ToString(),
-                    "cell:", treasure.cellX, treasure.cellZ, "rate:", treasure.cellRateX,
-                    treasure.cellRateZ);
-    }
-
-    const std::uint32_t cellX = std::clamp<std::uint32_t>(
-        treasure.cellX < 0 ? 0u : static_cast<std::uint32_t>(treasure.cellX), 0u, room->width - 1u);
-    const std::uint32_t cellZ = std::clamp<std::uint32_t>(
-        treasure.cellZ < 0 ? 0u : static_cast<std::uint32_t>(treasure.cellZ), 0u, room->height - 1u);
-    const std::uint32_t assignment = cellZ * room->width + cellX + 1u;
-    const SDK::FVector2D cellCenter = mapComponent->GetRoomCenterInMapPosition(
-        mapType, roomId, static_cast<SDK::int32>(assignment), totalMap->IconPixelOffset, totalMap->canvasSize);
-    return cellCenter + axes.x * (std::clamp(treasure.cellRateX, 0.0f, 1.0f) - 0.5f) +
-           axes.z * (std::clamp(treasure.cellRateZ, 0.0f, 1.0f) - 0.5f);
+float GetLocationMarkerMapZ(const bloodstained::tracker::generated::LocationData& location,
+                            std::uint32_t roomHeight) {
+    // Item-wall actors place their root a quarter of a native map tile below the visible break point. This is only
+    // a few pixels on the total map, but the minimap zoom magnifies it noticeably. Keep the exported actor position
+    // authoritative and apply the presentation offset consistently in both map renderers.
+    const float markerOffset = location.type == LocationType::WALL ? WALL_MARKER_Z_OFFSET : 0.0f;
+    return std::clamp(location.map_z + markerOffset, 0.0f, static_cast<float>(roomHeight));
 }
 
 NativeMapAxes FindNativeMapAxes(SDK::UPBMapManager* mapManager,
@@ -622,14 +541,6 @@ std::size_t RenderReachableRoomGhosts(SDK::UMapManageBlueprint_C* map,
                 FindNativeRoomMarkerCorrection(map, mapComponent, mapType, totalMap, *mapGeometry[mapIndex]);
             mapGeometry[mapIndex]->markerAnchorCorrection =
                 markerCorrection.value_or(SDK::FVector2D{0.0f, mapGeometry[mapIndex]->cellSize.Y * 0.5f});
-            const SDK::FVector2D origin = MapRenderToCanvas(*mapGeometry[mapIndex], {});
-            Logger::Log(LogLevel::File, "[Tracker] Ghost-map transform; type:", static_cast<int>(mapType),
-                        "origin:", origin.X, origin.Y, "cell:", mapGeometry[mapIndex]->cellSize.X,
-                        mapGeometry[mapIndex]->cellSize.Y, "native grid offset:",
-                        mapGeometry[mapIndex]->gridOriginOffset.X, mapGeometry[mapIndex]->gridOriginOffset.Y,
-                        "marker anchor correction:", mapGeometry[mapIndex]->markerAnchorCorrection.X,
-                        mapGeometry[mapIndex]->markerAnchorCorrection.Y, "anchored to native marker:",
-                        markerCorrection.has_value());
         }
 
         int32_t zOrder = -1;
@@ -712,7 +623,7 @@ std::size_t RenderWallLocationMarkers(SDK::UMapManageBlueprint_C* map,
         }
 
         const float mapX = std::clamp(location.map_x, 0.0f, static_cast<float>(room->width));
-        const float mapZ = std::clamp(location.map_z, 0.0f, static_cast<float>(room->height));
+        const float mapZ = GetLocationMarkerMapZ(location, room->height);
         const std::uint32_t cellX = std::min(static_cast<std::uint32_t>(mapX), room->width - 1u);
         const std::uint32_t cellZ = std::min(static_cast<std::uint32_t>(mapZ), room->height - 1u);
         const std::uint32_t assignment = cellZ * room->width + cellX + 1u;
@@ -777,10 +688,8 @@ std::size_t RenderSyntheticTreasureMarkers(
     auto* playerController = GameManager::Instance().PlayerController();
     auto* hud = playerController ? static_cast<SDK::APBInterfaceHUD*>(playerController->MyHUD) : nullptr;
     auto* mapComponent = hud ? hud->m_MapComponent : nullptr;
-    auto* treasureComponent = hud ? hud->m_MapTreasureIconComponent : nullptr;
-    if (!mapManager || !mapComponent || !treasureComponent) return 0;
+    if (!mapManager || !mapComponent) return 0;
 
-    const auto registeredTreasures = GetRegisteredTreasureData(treasureIds);
     auto* chestTexture = CreateEmbeddedTexture(map, IDR_CHEST_MARKER_PNG, "chest marker");
     std::array<std::optional<GhostMapGeometry>, 4> geometries;
     std::array<std::optional<NativeMapAxes>, 4> axes;
@@ -788,12 +697,8 @@ std::size_t RenderSyntheticTreasureMarkers(
     std::size_t rendered = 0;
     for (const auto& treasureId : treasureIds) {
         const auto* location = FindChestLocationByNativeId(treasureId);
-        const auto registered = registeredTreasures.find(treasureId);
-        RegisteredTreasureData* treasure = registered == registeredTreasures.end() ? nullptr : registered->second;
-        const SDK::FName roomId = location && location->has_map_position
-                                      ? NameFromString(location->room)
-                                      : (treasure ? treasure->roomId : SDK::FName{});
-        if (roomId.ToString().empty()) continue;
+        if (!location || !location->has_map_position) continue;
+        const SDK::FName roomId = NameFromString(location->room);
         const SDK::EAreaID area = mapManager->RoomIdToAreaId(roomId);
         const SDK::EDivideMap mapType = mapComponent->CheckMapType(area);
         auto* totalMap = GetMapForType(map, mapType);
@@ -813,14 +718,8 @@ std::size_t RenderSyntheticTreasureMarkers(
                 FindNativeTreasureMarkerSize(map, mapComponent, mapType, *geometries[mapIndex]);
         }
 
-        auto renderPosition = location
-                                  ? GetStaticLocationMapPosition(mapComponent, mapType, totalMap,
-                                                                 *axes[mapIndex], *location)
-                                  : std::nullopt;
-        if (!renderPosition && treasure) {
-            renderPosition = GetStableTreasureMapPosition(
-                mapManager, mapComponent, mapType, totalMap, *treasure, *axes[mapIndex]);
-        }
+        const auto renderPosition =
+            GetStaticLocationMapPosition(mapComponent, mapType, totalMap, *axes[mapIndex], *location);
         if (!renderPosition) continue;
         const SDK::FVector2D markerCenter = MapRenderToCanvas(*geometries[mapIndex], *renderPosition);
         auto* image = static_cast<SDK::UImage*>(
@@ -845,10 +744,6 @@ std::size_t RenderSyntheticTreasureMarkers(
         spawnedMarkerWidgets.push_back(TrackWidget(image));
         ++rendered;
     }
-    Logger::Log(LogLevel::File, "[Tracker] Synthesized", rendered, "of", treasureIds.size(),
-                "missing main-map chest markers from static positions or captured registrations; captured:",
-                REGISTERED_TREASURES.size(), "live arrays:", treasureComponent->TreasureList.Num(),
-                treasureComponent->m_KeyArray.Num(), treasureComponent->m_DataArray.Num());
     return rendered;
 }
 
@@ -994,7 +889,7 @@ std::optional<SDK::FVector2D> GetMiniMapLocationPosition(
     if (mapComponent->CheckMapType(mapManager->RoomIdToAreaId(roomId)) != areaMapType) return std::nullopt;
 
     const float mapX = std::clamp(location.map_x, 0.0f, static_cast<float>(room->width));
-    const float mapZ = std::clamp(location.map_z, 0.0f, static_cast<float>(room->height));
+    const float mapZ = GetLocationMarkerMapZ(location, room->height);
     const std::uint32_t cellX = std::min(static_cast<std::uint32_t>(mapX), room->width - 1u);
     const std::uint32_t cellZ = std::min(static_cast<std::uint32_t>(mapZ), room->height - 1u);
     const std::uint32_t assignment = cellZ * room->width + cellX + 1u;
@@ -1310,6 +1205,19 @@ SDK::FVector2D GetMiniMapOverlayMarkerSize(const MiniMapLayerTransform& transfor
     return {40.5f * std::abs(transform.scale.X), 40.5f * std::abs(transform.scale.Y)};
 }
 
+SDK::FVector2D GetMiniMapShardOverlayMarkerSize(const MiniMapLayerTransform& transform) {
+    // Compare the solid glyphs rather than faint antialiasing/glow pixels: the shard fills 89x86 pixels of its
+    // canvas while the chest fills 32x26. Scaling by those bounds gives both markers the same visible footprint.
+    return {40.5f * (32.0f / 89.0f) * std::abs(transform.scale.X),
+            40.5f * (26.0f / 86.0f) * std::abs(transform.scale.Y)};
+}
+
+SDK::FVector2D GetMiniMapWallOverlayMarkerSize(const MiniMapLayerTransform& transform) {
+    // The solid wall glyph fills 58x59 pixels versus 32x26 for the chest glyph.
+    return {40.5f * (32.0f / 58.0f) * std::abs(transform.scale.X),
+            40.5f * (26.0f / 59.0f) * std::abs(transform.scale.Y)};
+}
+
 struct MiniMapRenderResult {
     bool anchored = false;
     std::size_t anchors = 0;
@@ -1361,7 +1269,6 @@ struct MiniMapMarkerBinding {
 
 std::vector<MiniMapMarkerBinding> MINI_MAP_MARKER_BINDINGS;
 std::unordered_set<std::string> MINI_MAP_PROTECTED_TREASURE_IDS;
-bool MINI_MAP_POOL_WARNING_LOGGED = false;
 
 SDK::UTreasureLocationMinimapBlueprint_C* ResolveMiniMapMarker(const TrackedWidgetHandle& handle) {
     return static_cast<SDK::UTreasureLocationMinimapBlueprint_C*>(ResolveWidget(handle));
@@ -1424,7 +1331,6 @@ void ClearMiniMapMarkerBindings() {
     BORROWED_MINIMAP_MARKERS.clear();
     MINI_MAP_MARKER_BINDINGS.clear();
     MINI_MAP_PROTECTED_TREASURE_IDS.clear();
-    MINI_MAP_POOL_WARNING_LOGGED = false;
 }
 
 bool IsMarkerAlreadyBorrowed(SDK::UTreasureLocationMinimapBlueprint_C* marker) {
@@ -1435,14 +1341,7 @@ bool IsMarkerAlreadyBorrowed(SDK::UTreasureLocationMinimapBlueprint_C* marker) {
 }
 
 bool BorrowInactiveNativeMarker(SDK::UMiniMapBlueprint_C* miniMap, MiniMapMarkerBinding& binding) {
-    if (!ENABLE_NATIVE_MINIMAP_MARKER_POOL) {
-        if (!MINI_MAP_POOL_WARNING_LOGGED) {
-            Logger::Log(LogLevel::File,
-                        "[Tracker] Native minimap marker pooling is disabled after unsafe Blueprint ownership was observed");
-            MINI_MAP_POOL_WARNING_LOGGED = true;
-        }
-        return false;
-    }
+    if (!ENABLE_NATIVE_MINIMAP_MARKER_POOL) return false;
     if (!miniMap || !miniMap->Treasure_Panel) return false;
     for (auto* marker : miniMap->TreasureIconList) {
         if (!marker || !marker->Image_30 || marker->GetParent() != miniMap->Treasure_Panel ||
@@ -1462,18 +1361,9 @@ bool BorrowInactiveNativeMarker(SDK::UMiniMapBlueprint_C* miniMap, MiniMapMarker
         BORROWED_MINIMAP_MARKERS.insert(marker);
         binding.nativeSnapshot = snapshot;
         binding.zeroGeometryTicks = 0;
-        MINI_MAP_POOL_WARNING_LOGGED = false;
-        Logger::Log(LogLevel::File, "[Tracker] Minimap marker borrowed inactive native treasure widget:",
-                    binding.key, marker->treasureID.ToString());
         return true;
     }
 
-    if (!MINI_MAP_POOL_WARNING_LOGGED) {
-        Logger::Log(LogLevel::File,
-                    "[Tracker] No safe inactive native treasure widget is available for minimap marker:",
-                    binding.key);
-        MINI_MAP_POOL_WARNING_LOGGED = true;
-    }
     return false;
 }
 
@@ -1595,8 +1485,6 @@ MiniMapRenderResult RenderMiniMapTracker(
             binding.desiredAutoSize = slot->GetAutoSize();
         }
         MINI_MAP_MARKER_BINDINGS.push_back(std::move(binding));
-        Logger::Log(LogLevel::File, "[Tracker] Created safe minimap wall overlay:",
-                    std::string(location.name), markerCenter->X, markerCenter->Y);
         ++result.walls;
     }
 
@@ -1639,11 +1527,6 @@ MiniMapRenderResult RenderMiniMapTracker(
         ++result.shards;
     }
 
-    Logger::Log(LogLevel::File, "[Tracker] Minimap transform; render type:", static_cast<int>(renderMapType),
-                "area type:", static_cast<int>(areaMapType), "native cell:", totalMap->RoomPixelSize.X,
-                totalMap->RoomPixelSize.Y, "scale:", layerTransform->scale.X, layerTransform->scale.Y,
-                "translation:", layerTransform->translation.X, layerTransform->translation.Y,
-                "active native chest anchors:", layerTransform->anchors.size());
     return result;
 }
 
@@ -1756,51 +1639,7 @@ void InGameTracker::ObserveNativeItem(std::string_view itemName) {
 
 void InGameTracker::ObserveLocationCleared(std::string_view locationName) {
     miniMapDirty_ = true;
-    Logger::Log(LogLevel::File, "[Tracker] Invalidated location markers after local clear:",
-                std::string(locationName));
-}
-
-void InGameTracker::ObserveTreasureActor(void* rawActor) {
-    auto* object = static_cast<SDK::UObject*>(rawActor);
-    if (!object || !object->Class || !IsTreasureObject(object)) return;
-    const auto existing = std::ranges::find_if(OBSERVED_TREASURE_ACTORS, [object](const auto& handle) {
-        return handle.pointer == object && handle.objectIndex == object->Index;
-    });
-    if (existing != OBSERVED_TREASURE_ACTORS.end()) return;
-
-    OBSERVED_TREASURE_ACTORS.push_back(TrackedTreasureActor{object, object->Index});
-    const auto* dropItemId = GetObjectPropertyValue<SDK::FName>(object, "DropItemID");
-    const auto isRegistered = GetObjectBoolProperty(object, "IsRegistered");
-    const auto hidden = GetObjectBoolProperty(object, "Hidden");
-    Logger::Log(LogLevel::File, "[Tracker] Observed treasure actor event; actor:", object->GetName(),
-                "class:", object->Class->Name.ToString(), "drop ID:",
-                dropItemId ? dropItemId->ToString() : "<missing>", "registered:",
-                isRegistered ? (*isRegistered ? "true" : "false") : "<missing>", "hidden:",
-                hidden ? (*hidden ? "true" : "false") : "<missing>");
-    if (ProcessObservedTreasureActors()) miniMapDirty_ = true;
-}
-
-void InGameTracker::DiscoverLoadedTreasureActors() {
-    const SDK::int32 objectCount = SDK::UObject::GObjects->Num();
-    std::unordered_map<SDK::UClass*, bool> treasureClasses;
-    std::size_t discovered = 0;
-    for (SDK::int32 index = 0; index < objectCount; ++index) {
-        auto* object = SDK::UObject::GObjects->GetByIndex(index);
-        if (!object || !object->Class || object->IsDefaultObject()) continue;
-        auto [classMatch, inserted] = treasureClasses.try_emplace(object->Class, false);
-        if (inserted) classMatch->second = IsTreasureObject(object);
-        if (!classMatch->second) continue;
-
-        const std::size_t previousCount = OBSERVED_TREASURE_ACTORS.size();
-        ObserveTreasureActor(object);
-        if (OBSERVED_TREASURE_ACTORS.size() != previousCount) ++discovered;
-    }
-    if (ProcessObservedTreasureActors()) miniMapDirty_ = true;
-    const std::size_t resolvedTreasureClasses = std::ranges::count_if(
-        treasureClasses, [](const auto& entry) { return entry.second; });
-    Logger::Log(LogLevel::File, "[Tracker] One-time post-load treasure discovery; objects:", objectCount,
-                "resolved classes:", resolvedTreasureClasses, "new actors:", discovered,
-                "tracked actors:", OBSERVED_TREASURE_ACTORS.size());
+    ReconcileFinishedTreasureMarkers(Archipelago::ConnectedInstance());
 }
 
 void InGameTracker::ResetConnection() {
@@ -1811,6 +1650,8 @@ void InGameTracker::ResetConnection() {
     pendingGhostMap_ = nullptr;
     pendingWallLocationIds_.clear();
     reachableRooms_.clear();
+    RECONCILED_TREASURE_COMPONENT_INDEX = -1;
+    RECONCILED_FINISHED_TREASURE_IDS.clear();
     miniMapDirty_ = true;
 }
 
@@ -1857,9 +1698,10 @@ void InGameTracker::ClearMainMapMarkers() {
     }
     spawnedMainMapGhostWidgets_.clear();
 
-    for (const auto& markerWidget : activatedNativeMarkerWidgets_) {
-        if (auto* widget = ResolveWidget(markerWidget)) SetCollapsed(widget);
-    }
+    // Event_MapStart has already refreshed the native marker state before ApplyMapMarkers runs. Restore only the
+    // image resource that the tracker replaced; hiding the widget here would overwrite the game's newly refreshed
+    // opened/closed state and can leave a cleared chest carrying the tracker's green brush.
+    RestoreNativeImageBrushes(MAIN_MAP_NATIVE_BRUSH_OVERRIDES);
     activatedNativeMarkerWidgets_.clear();
 
     for (const auto& markerWidget : spawnedWallMarkerWidgets_) {
@@ -1880,9 +1722,7 @@ void InGameTracker::ClearMiniMapMarkers() {
     ClearMiniMapMarkerBindings();
     miniMapVisibilityWidgets_.clear();
 
-    for (const auto& markerWidget : activatedMiniMapMarkerWidgets_) {
-        if (auto* widget = ResolveWidget(markerWidget)) SetCollapsed(widget);
-    }
+    RestoreNativeImageBrushes(MINI_MAP_NATIVE_BRUSH_OVERRIDES);
     activatedMiniMapMarkerWidgets_.clear();
 
     for (const auto& markerWidget : spawnedMiniMapWidgets_) {
@@ -1908,16 +1748,9 @@ void InGameTracker::ApplyDeferredGhostMap(void* mapWidget) {
     }
     if (!HasLaidOutMap(map)) return;
 
-    const std::size_t ghostCells =
-        RenderReachableRoomGhosts(map, reachableRooms_, spawnedMainMapGhostWidgets_);
-    const std::size_t wallMarkers =
-        RenderWallLocationMarkers(map, pendingWallLocationIds_, spawnedWallMarkerWidgets_);
-    const std::size_t syntheticTreasureMarkers =
-        RenderSyntheticTreasureMarkers(map, pendingSyntheticTreasureIds_, spawnedWallMarkerWidgets_);
-    Logger::Log(LogLevel::File, "[Tracker] Rendered", ghostCells, "deferred ghost map cells from",
-                reachableRooms_.size(), "reachable rooms and", wallMarkers, "wall icons from",
-                pendingWallLocationIds_.size(), "reachable missing wall checks plus",
-                syntheticTreasureMarkers, "synthetic chest icons");
+    RenderReachableRoomGhosts(map, reachableRooms_, spawnedMainMapGhostWidgets_);
+    RenderWallLocationMarkers(map, pendingWallLocationIds_, spawnedWallMarkerWidgets_);
+    RenderSyntheticTreasureMarkers(map, pendingSyntheticTreasureIds_, spawnedWallMarkerWidgets_);
     pendingGhostMap_ = nullptr;
     pendingWallLocationIds_.clear();
     pendingSyntheticTreasureIds_.clear();
@@ -1926,8 +1759,7 @@ void InGameTracker::ApplyDeferredGhostMap(void* mapWidget) {
 void InGameTracker::ApplyMapMarkers(void* mapWidget) {
     auto* archipelago = Archipelago::ConnectedInstance();
     auto* map = static_cast<SDK::UMapManageBlueprint_C*>(mapWidget);
-    DiscoverLoadedTreasureActors();
-    ProcessObservedTreasureActors();
+    ReconcileFinishedTreasureMarkers(archipelago);
     ClearMainMapMarkers();
     if (!IsMainMapEnabled() || !archipelago || !map) return;
     pendingWallLocationIds_.clear();
@@ -1970,8 +1802,10 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
         }
         if (location->type == LocationType::CHEST) {
             treasureIds.insert(NormalizeTreasureId(std::string(*nativeLocationName)));
-            if (!reachableTreasureLocations.empty()) reachableTreasureLocations += ", ";
-            reachableTreasureLocations += location->name;
+            if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+                if (!reachableTreasureLocations.empty()) reachableTreasureLocations += ", ";
+                reachableTreasureLocations += location->name;
+            }
         } else if (location->type == LocationType::WALL) {
             pendingWallLocationIds_.insert(location->id);
         } else if (location->type == LocationType::ENEMY) {
@@ -1984,28 +1818,38 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
         }
     }
 
-    std::size_t treasureMarkers = 0;
     std::unordered_set<std::string> materializedTreasureIds;
     std::string markedTreasureIds;
     auto* chestMarkerTexture =
         treasureIds.empty() ? nullptr : CreateEmbeddedTexture(map, IDR_CHEST_MARKER_PNG, "chest marker");
     for (auto* marker : map->TreasureMarkerList) {
-        if (!marker || !treasureIds.contains(NormalizeTreasureId(marker->treasureID.ToString()))) continue;
+        if (!marker || !marker->Image_30) continue;
+        const std::string treasureId = NormalizeTreasureId(marker->treasureID.ToString());
+        if (!treasureIds.contains(treasureId)) continue;
+        // Some large rooms snap several native treasure widgets onto coarse shared map cells. When the cooked actor
+        // position is known, use the generated marker at that exact position and suppress the misleading native one.
+        if (HasAuthoritativeChestPosition(treasureId)) {
+            SetCollapsed(marker);
+            if (marker->Image_30) SetCollapsed(marker->Image_30);
+            continue;
+        }
+        RememberNativeImageBrush(MAIN_MAP_NATIVE_BRUSH_OVERRIDES, marker->Image_30);
         SetVisible(marker);
         SetVisible(marker->Image_30);
         activatedNativeMarkerWidgets_.push_back(TrackWidget(marker->Image_30));
         if (chestMarkerTexture) SetImageTexture(marker->Image_30, chestMarkerTexture);
         SetImageColor(marker->Image_30, chestMarkerTexture ? SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f}
                                                          : SDK::FLinearColor{0.15f, 0.85f, 1.0f, 1.0f});
-        if (!markedTreasureIds.empty()) markedTreasureIds += ", ";
-        markedTreasureIds += marker->treasureID.ToString();
+        if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+            if (!markedTreasureIds.empty()) markedTreasureIds += ", ";
+            markedTreasureIds += marker->treasureID.ToString();
+        }
         materializedTreasureIds.insert(NormalizeTreasureId(marker->treasureID.ToString()));
-        treasureMarkers++;
     }
+    SuppressFinishedTreasureMarkers(map->TreasureMarkerList);
 
     auto* shardMarkerTexture =
         enemyByRoom.empty() ? nullptr : CreateEmbeddedTexture(map, IDR_SHARD_MARKER_PNG, "shard marker");
-    std::size_t roomMarkers = 0;
     for (const auto& markerEntry : map->RoomMarkerMap) {
         std::string roomId = markerEntry.Key().ToString();
         auto* marker = markerEntry.Value();
@@ -2017,32 +1861,35 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
         auto enemy = enemyByRoom.find(roomId);
         if (enemy != enemyByRoom.end()) {
             marker->EnemyType = NameFromString(enemy->second);
+            RememberNativeImageBrush(MAIN_MAP_NATIVE_BRUSH_OVERRIDES, marker->Image_71);
             if (shardMarkerTexture) SetImageTexture(marker->Image_71, shardMarkerTexture);
             SetImageColor(marker->Image_71, shardMarkerTexture ? SDK::FLinearColor{1.0f, 1.0f, 1.0f, 1.0f}
                                                               : SDK::FLinearColor{0.2f, 0.9f, 0.35f, 1.0f});
         }
-        roomMarkers++;
     }
 
-    Logger::Log(LogLevel::File, "[Tracker] Marked", treasureMarkers, "treasure icons and", roomMarkers,
-                "enemy rooms from", reachableLocations.size(),
-                "reachable missing checks; requested chest IDs:", treasureIds.size());
-    if (!markedTreasureIds.empty()) {
-        Logger::Log(LogLevel::File, "[Tracker] Materialized in-logic treasure IDs:", markedTreasureIds);
-    }
-    if (!reachableTreasureLocations.empty()) {
-        Logger::Log(LogLevel::File, "[Tracker] Reachable missing chest checks:", reachableTreasureLocations);
+    if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+        if (!markedTreasureIds.empty()) {
+            Logger::Log(LogLevel::File, "[Tracker] Materialized in-logic treasure IDs:", markedTreasureIds);
+        }
+        if (!reachableTreasureLocations.empty()) {
+            Logger::Log(LogLevel::File, "[Tracker] Reachable missing chest checks:", reachableTreasureLocations);
+        }
     }
     std::string missingTreasureMarkers;
     for (const auto& treasureId : treasureIds) {
         if (materializedTreasureIds.contains(treasureId)) continue;
         pendingSyntheticTreasureIds_.insert(treasureId);
-        if (!missingTreasureMarkers.empty()) missingTreasureMarkers += ", ";
-        missingTreasureMarkers += treasureId;
+        if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+            if (!missingTreasureMarkers.empty()) missingTreasureMarkers += ", ";
+            missingTreasureMarkers += treasureId;
+        }
     }
-    if (!missingTreasureMarkers.empty()) {
-        Logger::Log(LogLevel::File, "[Tracker] In-logic chest IDs without native marker widgets:",
-                    missingTreasureMarkers);
+    if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+        if (!missingTreasureMarkers.empty()) {
+            Logger::Log(LogLevel::File, "[Tracker] In-logic chest IDs without native marker widgets:",
+                        missingTreasureMarkers);
+        }
     }
 }
 
@@ -2055,7 +1902,6 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
     };
 
     auto* miniMap = static_cast<SDK::UMiniMapBlueprint_C*>(miniMapWidget);
-    if (ProcessObservedTreasureActors()) miniMapDirty_ = true;
     auto* currentCanvas = miniMap ? miniMap->TotalMapBlueprint : nullptr;
     if (activeMiniMap_ != miniMap || activeMiniMapCanvas_ != currentCanvas) {
         ClearMiniMapMarkers();
@@ -2066,6 +1912,7 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
     }
 
     auto* archipelago = Archipelago::ConnectedInstance();
+    ReconcileFinishedTreasureMarkers(archipelago);
     if (!IsMiniMapEnabled() || !archipelago || !inventorySynchronized_ || !miniMap || !currentCanvas ||
         !miniMap->Treasure_Panel || !miniMap->Frame_Image || !IsWidgetPaintVisible(miniMap) ||
         !IsWidgetPaintVisible(miniMap->Frame_Image)) {
@@ -2131,9 +1978,9 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
             reachabilityDirty_ = false;
         }
 
-        for (const auto& markerWidget : activatedMiniMapMarkerWidgets_) {
-            if (auto* widget = ResolveWidget(markerWidget)) SetCollapsed(widget);
-        }
+        // MiniMapBlueprint.UpdateIcons runs before this post-Tick hook. Preserve its current visibility/color and
+        // restore the native image resource before rebuilding the AP target set.
+        RestoreNativeImageBrushes(MINI_MAP_NATIVE_BRUSH_OVERRIDES);
         activatedMiniMapMarkerWidgets_.clear();
         miniMapVisibilityWidgets_.clear();
         miniMapTreasureIds_.clear();
@@ -2164,10 +2011,15 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
                                  ? nullptr
                                  : CreateEmbeddedTexture(miniMap, IDR_CHEST_MARKER_PNG, "chest marker");
         for (auto* marker : miniMap->TreasureIconList) {
-            if (!marker || !marker->Image_30 ||
-                !miniMapTreasureIds_.contains(NormalizeTreasureId(marker->treasureID.ToString()))) {
+            if (!marker || !marker->Image_30) continue;
+            const std::string treasureId = NormalizeTreasureId(marker->treasureID.ToString());
+            if (!miniMapTreasureIds_.contains(treasureId)) continue;
+            if (HasAuthoritativeChestPosition(treasureId)) {
+                SetCollapsed(marker);
+                SetCollapsed(marker->Image_30);
                 continue;
             }
+            RememberNativeImageBrush(MINI_MAP_NATIVE_BRUSH_OVERRIDES, marker->Image_30);
             SetVisible(marker);
             SetVisible(marker->Image_30);
             if (chestTexture) SetImageTexture(marker->Image_30, chestTexture);
@@ -2176,6 +2028,37 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
             activatedMiniMapMarkerWidgets_.push_back(TrackWidget(marker->Image_30));
             miniMapVisibilityWidgets_.push_back(TrackWidget(marker));
             miniMapVisibilityWidgets_.push_back(TrackWidget(marker->Image_30));
+        }
+
+        if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+            auto* roomManager = SDK::UPBRoomManager::GetRoomManager();
+            const std::string currentRoom = roomManager ? roomManager->GetCurrentRoomId().ToString() : "<unknown>";
+            const SDK::FVector playerLocation = player ? player->K2_GetActorLocation() : SDK::FVector{};
+            Logger::Log(LogLevel::File, "[Tracker][Diagnostics] Current room:", currentRoom,
+                        "player world position:", playerLocation.X, playerLocation.Y, playerLocation.Z);
+            for (auto* marker : miniMap->TreasureIconList) {
+                if (!marker) continue;
+                const std::string treasureId = NormalizeTreasureId(marker->treasureID.ToString());
+                const auto* location = FindChestLocationByNativeId(treasureId);
+                if (!location || location->room != currentRoom) continue;
+                const auto bounds = marker->Image_30 ? GetWidgetScreenRect(miniMap, marker->Image_30) : std::nullopt;
+                Logger::Log(LogLevel::File, "[Tracker][Diagnostics] Native chest marker:",
+                            marker->treasureID.ToString(), "target:", miniMapTreasureIds_.contains(treasureId),
+                            "cleared:", archipelago->WasLocationClearedLocally(marker->treasureID.ToString()),
+                            "visibility:", static_cast<int>(marker->GetVisibility()),
+                            marker->Image_30 ? static_cast<int>(marker->Image_30->GetVisibility()) : -1,
+                            "bounds:", bounds ? bounds->left : -1.0f, bounds ? bounds->top : -1.0f,
+                            bounds ? bounds->right : -1.0f, bounds ? bounds->bottom : -1.0f);
+            }
+            if (auto* treasureComponent = hud->m_MapTreasureIconComponent) {
+                for (const auto& entry : treasureComponent->TreasureMarkerMapLocation) {
+                    const std::string treasureId = NormalizeTreasureId(entry.Key().ToString());
+                    const auto* location = FindChestLocationByNativeId(treasureId);
+                    if (!location || location->room != currentRoom) continue;
+                    Logger::Log(LogLevel::File, "[Tracker][Diagnostics] Stored chest marker:",
+                                entry.Key().ToString(), "position:", entry.Value().X, entry.Value().Y);
+                }
+            }
         }
 
         miniMapDirty_ = false;
@@ -2189,18 +2072,33 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
     for (const auto& markerWidget : miniMapVisibilityWidgets_) {
         if (auto* widget = ResolveWidget(markerWidget)) SetVisible(widget);
     }
+    // UpdateIcons runs before this hook on every minimap tick. Re-suppress exact-position AP targets after that
+    // native refresh so their coarse native widgets cannot reappear over a different physical chest.
+    for (auto* marker : miniMap->TreasureIconList) {
+        if (!marker) continue;
+        const std::string treasureId = NormalizeTreasureId(marker->treasureID.ToString());
+        if (!miniMapTreasureIds_.contains(treasureId) || !HasAuthoritativeChestPosition(treasureId)) continue;
+        SetCollapsed(marker);
+        if (marker->Image_30) SetCollapsed(marker->Image_30);
+    }
+    // The native Blueprint can recreate a green icon for an AP-renamed chest even after the physical chest and all
+    // of its AP slots are cleared. The local AP journal is authoritative, so suppress those stale native widgets
+    // after UpdateIcons has run rather than allowing them to masquerade as unchecked locations.
+    SuppressFinishedTreasureMarkers(miniMap->TreasureIconList);
 
     const auto clipRect = GetWidgetScreenRect(miniMap, miniMap->Frame_Image);
     auto layerTransform = GetNativeMiniMapTransform(miniMap, hud, *miniMapGeometry);
     if (!clipRect) {
-        static ULONGLONG lastMissingGeometryLog = 0;
-        const ULONGLONG now = GetTickCount64();
-        if (now - lastMissingGeometryLog >= 5000) {
-            lastMissingGeometryLog = now;
-            Logger::Log(LogLevel::File, "[Tracker] Screen overlay unavailable; native transform:",
-                        layerTransform.has_value(), "frame clip:", clipRect.has_value(), "treasure markers:",
-                        miniMap->TreasureIconList.Num(), "wall targets:", miniMapWallLocationIds_.size(),
-                        "shard targets:", miniMapShardRooms_.size());
+        if constexpr (ENABLE_TRACKER_DIAGNOSTICS) {
+            static ULONGLONG lastMissingGeometryLog = 0;
+            const ULONGLONG now = GetTickCount64();
+            if (now - lastMissingGeometryLog >= 5000) {
+                lastMissingGeometryLog = now;
+                Logger::Log(LogLevel::File, "[Tracker][Diagnostics] Screen overlay unavailable; native transform:",
+                            layerTransform.has_value(), "frame clip:", clipRect.has_value(), "treasure markers:",
+                            miniMap->TreasureIconList.Num(), "wall targets:", miniMapWallLocationIds_.size(),
+                            "shard targets:", miniMapShardRooms_.size());
+            }
         }
         clearOverlay();
         return;
@@ -2228,6 +2126,8 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
     const SDK::FVector2D markerSize = GetMiniMapOverlayMarkerSize(*layerTransform);
     const float markerWidth = markerSize.X;
     const float markerHeight = markerSize.Y;
+    const SDK::FVector2D shardMarkerSize = GetMiniMapShardOverlayMarkerSize(*layerTransform);
+    const SDK::FVector2D wallMarkerSize = GetMiniMapWallOverlayMarkerSize(*layerTransform);
 
     // GetRoomCenterInMapPosition returns coordinates in the render target's center-relative grid, while the map
     // texture is painted from IconPixelOffset inside that target. Applying that native offset through the measured
@@ -2253,22 +2153,15 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
     }
     std::unordered_set<std::string> syntheticTreasureIds;
     for (const auto& treasureId : miniMapTreasureIds_) {
-        if (!nativeWidgetTreasureIds.contains(treasureId)) syntheticTreasureIds.insert(treasureId);
+        if (HasAuthoritativeChestPosition(treasureId) || !nativeWidgetTreasureIds.contains(treasureId)) {
+            syntheticTreasureIds.insert(treasureId);
+        }
     }
-    const auto registeredTreasures = GetRegisteredTreasureData(syntheticTreasureIds);
     for (const auto& treasureId : syntheticTreasureIds) {
         const auto* location = FindChestLocationByNativeId(treasureId);
-        const auto registered = registeredTreasures.find(treasureId);
-        RegisteredTreasureData* treasure = registered == registeredTreasures.end() ? nullptr : registered->second;
-        auto mapPosition = location
-                               ? GetMiniMapLocationPosition(mapManager, mapComponent, renderMapType, areaMapType,
-                                                            currentCanvas, axes, *location)
-                               : std::nullopt;
-        if (!mapPosition && treasure &&
-            mapComponent->CheckMapType(mapManager->RoomIdToAreaId(treasure->roomId)) == areaMapType) {
-            mapPosition = GetStableTreasureMapPosition(
-                mapManager, mapComponent, renderMapType, currentCanvas, *treasure, axes);
-        }
+        if (!location || !location->has_map_position) continue;
+        const auto mapPosition = GetMiniMapLocationPosition(
+            mapManager, mapComponent, renderMapType, areaMapType, currentCanvas, axes, *location);
         if (!mapPosition) continue;
         const SDK::FVector2D pixelPosition = TransformMiniMapPosition(*mapPosition, *layerTransform);
         snapshot.markers.push_back(MiniMapOverlayMarker{MiniMapOverlayMarkerKind::CHEST, pixelPosition.X,
@@ -2282,7 +2175,7 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
         if (!mapPosition) continue;
         const SDK::FVector2D pixelPosition = TransformMiniMapPosition(*mapPosition, *layerTransform);
         snapshot.markers.push_back(MiniMapOverlayMarker{MiniMapOverlayMarkerKind::WALL, pixelPosition.X,
-                                                        pixelPosition.Y, markerWidth, markerHeight});
+                                                        pixelPosition.Y, wallMarkerSize.X, wallMarkerSize.Y});
     }
 
     for (const std::string& roomName : miniMapShardRooms_) {
@@ -2295,7 +2188,7 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
         if (!mapPosition) continue;
         const SDK::FVector2D pixelPosition = TransformMiniMapPosition(*mapPosition, *layerTransform);
         snapshot.markers.push_back(MiniMapOverlayMarker{MiniMapOverlayMarkerKind::SHARD, pixelPosition.X,
-                                                        pixelPosition.Y, markerWidth, markerHeight});
+                                                        pixelPosition.Y, shardMarkerSize.X, shardMarkerSize.Y});
     }
 
     {

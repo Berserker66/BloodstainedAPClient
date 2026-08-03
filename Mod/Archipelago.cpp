@@ -6,12 +6,14 @@
 #include <ProjectBlood_classes.hpp>
 #include <ProjectBlood_structs.hpp>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <string_view>
 #include <utility>
 
 #include "ClientVersion.h"
@@ -54,6 +56,14 @@ const size_t MAX_CONNECTION_FIELD_LENGTH = 1024;
 const int32_t MAX_CLEARED_LOCATIONS = 4096;
 const std::chrono::milliseconds ITEM_GRANT_INTERVAL(100);
 const std::chrono::milliseconds ITEM_GRANT_RETRY_DELAY(500);
+
+// These enemies award their shard exactly once, as part of their boss defeat sequence. If the client was not able
+// to observe that short-lived shard actor, the save's completed-boss flag is the authoritative durable evidence
+// that the corresponding location was cleared.
+constexpr std::array<std::string_view, 13> BOSS_SHARD_ENEMY_IDS = {
+    "N1001", "N1002", "N1003", "N1004", "N1005", "N1006", "N1008",
+    "N2001", "N2004", "N2006", "N2007", "N2012", "N2013",
+};
 
 #define UUID_FILE "uuid"
 #define CERT_STORE "cacert.pem"
@@ -291,6 +301,28 @@ size_t Archipelago::SendMissingClearedLocations() {
     }
     Logger::Log("[AP] Reconciled ", locations.size(), " missing location checks");
     return locations.size();
+}
+
+void Archipelago::ReconcileCompletedBossShardLocations() {
+    if (!ap || !IsConnected()) return;
+
+    auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
+    if (!gameInstance) return;
+
+    const auto missingLocations = ap->get_missing_locations();
+    for (const std::string_view enemyId : BOSS_SHARD_ENEMY_IDS) {
+        const std::string locationName = std::string(enemyId) + "_Shard";
+        const auto locationId = GetLocationId(locationName);
+        // Do not journal boss state for an older or differently configured world which has no such check.
+        if (!locationId || !missingLocations.contains(*locationId)) continue;
+
+        if (!gameInstance->IsCompletedBoss(FNameFromString(std::string(enemyId)))) continue;
+
+        const std::string nativeLocationName = "AP_" + locationName;
+        Logger::Log(LogLevel::File, "[AP] Recovered completed boss shard location from save:",
+                    nativeLocationName);
+        SendLocationChecks(nativeLocationName);
+    }
 }
 
 LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationId) {
@@ -1017,6 +1049,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
         UpdateObservedItemLedger();
         UpdateState(ArchipelagoConnectionState::SlotConnected);
         SendMissingClearedLocations();
+        ReconcileCompletedBossShardLocations();
         HookManager::ApplyCompatibilityShardMasterData();
         SaveConnectionInfo();
 

@@ -16,6 +16,7 @@
 #include "Engine_classes.hpp"
 #include "Logger.h"
 #include "ThreadQueue.h"
+#include "TrackerData.generated.h"
 #include "Utils.h"
 
 #define PLAYER_NAME "Chr_P0000_C_0"
@@ -69,6 +70,14 @@ bool GameManager::PopulateDisplayToItemIdTable() {
 
         std::string displayName = itemData.Name.ToString();
         DisplayNameToItemId[displayName] = itemId;
+    }
+
+    // Do not depend on the active localization or RowMap iteration order for protocol items. The APWorld
+    // exporter supplies the canonical display name and native catalog ID for every item in its catalog.
+    for (const auto& binding : bloodstained::tracker::generated::ITEM_BINDINGS) {
+        const std::string nativeId(binding.native_name);
+        DisplayNameToItemId[nativeId] = nativeId;
+        DisplayNameToItemId[std::string(binding.display_name)] = nativeId;
     }
 
     // The crossover catalog also contains COL_Zangetsuto. Both rows can resolve

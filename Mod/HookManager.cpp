@@ -375,17 +375,6 @@ bool HookManager::Init() {
         return false;
     }
 
-    // Register chest lifecycle observers as soon as ProcessEvent is hooked. PostInit deliberately waits for the
-    // player and HUD, by which time the streamed level containing a loaded save may already have constructed and
-    // begun play. ObserveTreasureActor safely defers native map registration until the HUD component exists.
-    const auto observeTreasure = [](void* obj) { InGameTracker::Instance().ObserveTreasureActor(obj); };
-    for (const char* className : {"PBEasyTreasureBox_BP_C", "PBPureMiriamTreasureBox_BP_C",
-                                  "PBBronzeTreasureBox_BP_C", "PBGoldenTreasureBox_BP_C",
-                                  "BP_ChaosTreasureBox_C"}) {
-        NotifyOnClassFunction(className, "UserConstructionScript", observeTreasure);
-        NotifyOnClassFunction(className, "ReceiveBeginPlay", observeTreasure);
-    }
-
     // When game and player completely load in
     NotifyOnClassFunction("PBGameMode_Miriam_BP_C", "OnLoadGameCompletely", [](void* obj) {
         // The title world and its widgets have already been destroyed by this point.
