@@ -26,8 +26,6 @@ struct ArchipelagoConnectionInfo {
 
 enum class LocationCheckResult { NotReady, UnknownLocation, AlreadyChecked, Sent };
 
-enum class ItemLookupResult { NotReady, UnknownItem, KnownItem };
-
 enum class ArchipelagoConnectionState {
     Disconnected = 0,
     Connecting = 1,
@@ -68,7 +66,7 @@ class Archipelago {
     std::optional<ArchipelagoConnectionInfo> LoadSavedConnectionInfo() const;
 
     LocationCheckResult SendLocationChecks(const std::string& locationId);
-    ItemLookupResult GetItemLookupResult(const std::string& itemName) const;
+    bool IsShardShuffleEnabled() const;
     bool IsMissingLocation(const std::string& locationName, std::uint64_t expectedId) const;
     bool WasLocationClearedLocally(const std::string& locationName);
     std::unordered_map<std::string, std::uint32_t> GetTrackerInventory() const;
@@ -83,17 +81,17 @@ class Archipelago {
     void AbortPassword();
     void ConnectSlot();
     void LoadClearedLocations();
-    void LoadLocalProgress();
+    bool LoadLocalProgress();
     void ProcessReceivedItems();
     void CompleteReceivedItem(int64_t itemIndex, int64_t itemId, const std::string& itemName,
                               const std::string& savePrefix, uint64_t generation, ItemGrantResult result);
-    void LoadItemLedger();
+    bool LoadEntitlementLedger();
     void PersistAwardedItemCounts() const;
-    void PersistObservedItemLedger() const;
-    void UpdateObservedItemLedger();
     void ReconcileReceivedProgressionInventory();
     void ReconcileCompletedBossShardLocations();
-    void TryMigrateLegacyProgress();
+    bool ValidateSlotAndSave(const json& slotData);
+    bool HasCurrentSaveSchema() const;
+    bool HasLegacySaveState() const;
     void RecordClearedLocation(const std::string& locationId);
     void SaveConnectionInfo() const;
     bool ApplyConnectedEnemyDropShuffle(const std::string& seedName, std::uint32_t slotId);
@@ -112,13 +110,9 @@ class Archipelago {
     std::string slotName_;
     std::string password_;
     std::string localSavePrefix_;
-    std::string loadedLedgerPrefix_;
     int itemsHandling_ = 0b111;  // Send all received items, including starting inventory
 
     mutable std::string lastError_;
-    mutable int64_t lastReceivedItemIndex_ = -1;
-    int64_t lastQueuedItemIndex_ = -1;
-    std::optional<int32_t> legacyReceivedItemIndex_;
     mutable bool pendingDeathlink_ = false;
     mutable bool wantsDeathlink_ = false;
     bool localProgressLoaded_ = false;
@@ -126,14 +120,11 @@ class Archipelago {
     bool receivedItemGrantPending_ = false;
     bool receivedProgressionInventoryReconciled_ = false;
     bool clearedLocationsLoaded_ = false;
-    bool itemLedgerLoaded_ = false;
     std::atomic_flag polling_ = ATOMIC_FLAG_INIT;
     std::chrono::steady_clock::time_point receivedItemRetryAt_{};
     uint64_t receivedItemGeneration_ = 0;
 
-    std::map<int64_t, APClient::NetworkItem> pendingReceivedItems_;
     std::map<int64_t, APClient::NetworkItem> receivedItems_;
-    std::map<int64_t, int64_t> observedItemIdsByIndex_;
     std::unordered_map<int64_t, std::uint32_t> awardedItemCounts_;
     std::vector<std::string> clearedLocations_;
     json slotData_;

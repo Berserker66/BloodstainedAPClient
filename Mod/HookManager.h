@@ -47,8 +47,8 @@ class HookManager {
 
     static bool playerDetected;
     static bool shuttingDown;
-    static void ApplyCompatibilityShardMasterData();
-    static void ResetCompatibilityShardMasterData();
+    static void ApplyShardDropPolicy();
+    static void ResetShardDropPolicy();
 
    private:
     HookManager() = default;
@@ -65,11 +65,6 @@ class HookManager {
         const bool isTick = funcName == "ReceiveTick" || funcName == "Tick";
         if (isTick) {
             ThreadQueue::Instance().Flush();
-            if (!shuttingDown && GameManager::Instance().IsInitialized() &&
-                !GameManager::Instance().IsPlayerDead()) {
-                APBridge::Instance().ProcessPending();
-                Archipelago::Instance().Poll();
-            }
         }
 
         notifyObject.OnProcessEvent(obj, className, funcName, params);

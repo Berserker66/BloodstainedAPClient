@@ -7,28 +7,41 @@ namespace bloodstained::tracker {
 void Tracker::SetInventory(const std::unordered_map<std::string, std::uint32_t>& inventory) {
     std::fill(inventory_.begin(), inventory_.end(), 0);
     for (std::size_t i = 0; i < generated::ITEMS.size(); ++i) {
+        if (std::ranges::any_of(generated::EVENTS, [i](const auto& event) { return event.item == i; })) continue;
         auto item = inventory.find(std::string(generated::ITEMS[i]));
         if (item != inventory.end()) inventory_[i] = item->second;
     }
 }
 
 std::vector<bool> Tracker::GetReachableRegions(Difficulty difficulty) const {
-    std::vector<bool> reachable(generated::REGIONS.size(), false);
-    reachable[generated::START_REGION] = true;
+    return EvaluateReachability(difficulty).regions;
+}
+
+Tracker::ReachabilityState Tracker::EvaluateReachability(Difficulty difficulty) const {
+    ReachabilityState state{std::vector<bool>(generated::REGIONS.size(), false), inventory_};
+    state.regions[generated::START_REGION] = true;
 
     bool changed = true;
     while (changed) {
         changed = false;
-        for (const auto& entrance : generated::ENTRANCES) {
-            if (!IncludesDifficulty(entrance.difficulties, difficulty) || !reachable[entrance.source] ||
-                reachable[entrance.target] || !IsRuleSatisfied(entrance.rule)) {
+        for (const auto& event : generated::EVENTS) {
+            if (!IncludesDifficulty(event.difficulties, difficulty) || !state.regions[event.source] ||
+                state.inventory[event.item] != 0 || !IsRuleSatisfied(event.rule, state.inventory)) {
                 continue;
             }
-            reachable[entrance.target] = true;
+            state.inventory[event.item] = 1;
+            changed = true;
+        }
+        for (const auto& entrance : generated::ENTRANCES) {
+            if (!IncludesDifficulty(entrance.difficulties, difficulty) || !state.regions[entrance.source] ||
+                state.regions[entrance.target] || !IsRuleSatisfied(entrance.rule, state.inventory)) {
+                continue;
+            }
+            state.regions[entrance.target] = true;
             changed = true;
         }
     }
-    return reachable;
+    return state;
 }
 
 std::vector<const generated::RoomMapData*> Tracker::GetReachableRooms(Difficulty difficulty) const {
@@ -47,11 +60,11 @@ std::vector<const generated::RoomMapData*> Tracker::GetReachableRooms(Difficulty
 }
 
 std::vector<const generated::LocationData*> Tracker::GetReachableLocations(Difficulty difficulty) const {
-    const std::vector<bool> reachableRegions = GetReachableRegions(difficulty);
+    const ReachabilityState state = EvaluateReachability(difficulty);
     std::vector<const generated::LocationData*> reachableLocations;
     for (const auto& location : generated::LOCATIONS) {
-        if (IncludesDifficulty(location.difficulties, difficulty) && reachableRegions[location.region] &&
-            IsRuleSatisfied(location.rule)) {
+        if (IncludesDifficulty(location.difficulties, difficulty) && state.regions[location.region] &&
+            IsRuleSatisfied(location.rule, state.inventory)) {
             reachableLocations.push_back(&location);
         }
     }
@@ -72,10 +85,10 @@ std::vector<std::string_view> Tracker::GetReachableEnemyRooms(const generated::L
     std::vector<std::string_view> rooms;
     if (location.type != generated::LocationType::ENEMY) return rooms;
 
-    const std::vector<bool> reachableRegions = GetReachableRegions(difficulty);
+    const ReachabilityState state = EvaluateReachability(difficulty);
     for (const auto& entrance : generated::ENTRANCES) {
         if (entrance.target == location.region && IncludesDifficulty(entrance.difficulties, difficulty) &&
-            reachableRegions[entrance.source] && IsRuleSatisfied(entrance.rule)) {
+            state.regions[entrance.source] && IsRuleSatisfied(entrance.rule, state.inventory)) {
             const std::string_view room = generated::REGION_ROOMS[entrance.source];
             if (!room.empty()) rooms.push_back(room);
         }
@@ -114,9 +127,9 @@ bool Tracker::IsTraversalItem(std::string_view name) {
                generated::TRAVERSAL_NATIVE_ITEMS.end();
 }
 
-bool Tracker::IsRuleSatisfied(std::uint32_t rule) const {
+bool Tracker::IsRuleSatisfied(std::uint32_t rule, const std::vector<std::uint32_t>& inventory) {
     static const RuleEvaluator evaluator(generated::REQUIREMENTS, generated::OPERANDS, generated::NODES);
-    return evaluator.Evaluate(rule, inventory_);
+    return evaluator.Evaluate(rule, inventory);
 }
 
 bool Tracker::IncludesDifficulty(std::uint8_t mask, Difficulty difficulty) {

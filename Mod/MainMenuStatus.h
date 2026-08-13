@@ -14,12 +14,15 @@ class MainMenuStatus {
     void Show(SDK::UObject* worldContext);
     void Hide();
     void Forget();
+    bool IsStaticPakReady() const;
 
    private:
     enum class PakStatus {
         Unknown,
-        ArchipelagoEnabled,
-        ArchipelagoDisabled,
+        Ready,
+        Missing,
+        Invalid,
+        LegacyConflict,
     };
 
     MainMenuStatus() = default;
@@ -33,6 +36,8 @@ class MainMenuStatus {
 
     SDK::UVersionNumber_C* widget = nullptr;
     SDK::UTextBlock* textBlock = nullptr;
+    int widgetIndex = -1;
+    int textBlockIndex = -1;
     unsigned long long lastRefresh = 0;
     PakStatus pakStatus = PakStatus::Unknown;
 };

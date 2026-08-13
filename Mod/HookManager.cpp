@@ -13,6 +13,7 @@
 
 #include "Basic.hpp"
 #include "CoreUObject_classes.hpp"
+#include "EnemyDropShuffle.h"
 #include "GameManager.h"
 #include "Gui.h"
 #include "InGameTracker.h"
@@ -33,20 +34,14 @@ void (*HookManager::originalProcessLocalScriptFunction)(SDK::UObject*, SDK::UFun
 bool HookManager::playerDetected = false;
 bool HookManager::shuttingDown = false;
 
-struct ShardAppearance {
-    SDK::EShardType type;
-    SDK::EShardColor color;
-};
-
-static std::unordered_map<std::string, ShardAppearance> originalRandomizedShardAppearances;
 static std::unordered_map<std::string, SDK::EDropSpecialFlag> originalRandomizedDropFlags;
 
 namespace {
 
 const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     // Generated from the unmodified base-game PB_DT_DropRateMaster in pakchunk0.
-    // Runtime table access is insufficient because Randomizer.pak has already replaced
-    // these rows with AP_* placeholder shards by the time this plugin loads.
+    // Runtime table access is insufficient because BloodstainedAP.pak has already
+    // replaced these rows with AP_* placeholder shards by the time this plugin loads.
     {"AP_AAAA_Shard", "Dummy"},
     {"AP_N1001_Shard", "SwingTentacle"},
     {"AP_N1002_Shard", "Bloodsteel"},
@@ -184,18 +179,6 @@ std::optional<SDK::FName> ResolveVanillaShardId(const SDK::FName& randomizedShar
     return FNameFromString(knownShard->second);
 }
 
-ItemLookupResult GetVanillaShardItemSupport(Archipelago& archipelago, const SDK::FName& vanillaShardId) {
-    SDK::FPBItemCatalogData itemData{};
-    GameManager::Instance().Player()->CharacterInventory->GetItemDataById(vanillaShardId, &itemData);
-    std::string displayName = itemData.Name.ToString();
-
-    if (!displayName.empty()) {
-        ItemLookupResult result = archipelago.GetItemLookupResult(displayName);
-        if (result != ItemLookupResult::UnknownItem) return result;
-    }
-    return archipelago.GetItemLookupResult(vanillaShardId.ToString());
-}
-
 SDK::EShardColor DefaultShardColor(SDK::EShardType shardType) {
     switch (shardType) {
         case SDK::EShardType::Trigger:
@@ -255,23 +238,79 @@ bool RestoreVanillaShardAppearance(SDK::AShardBase* shardBase, const SDK::FName&
     return true;
 }
 
-}  // namespace
+void ReplaceItemDropperOutput(SDK::Params::PBDropManager_GetItemDroppableEnemies& params) {
+    if (!EnemyDropShuffle::IsApplied()) return;
 
-void HookManager::ResetCompatibilityShardMasterData() {
-    auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
-    if (gameInstance) {
-        auto* shardManager = gameInstance->GetShardManager();
-        if (shardManager && shardManager->ShardMasterTable) {
-            for (const auto& [rowName, appearance] : originalRandomizedShardAppearances) {
-                auto* row = FindShardMasterRow(shardManager->ShardMasterTable, rowName);
-                if (!row) continue;
-                row->ShardType = appearance.type;
-                row->ShardColorOverride = appearance.color;
-            }
-            originalRandomizedShardAppearances.clear();
+    std::vector<SDK::FName> enemies;
+    std::unordered_set<std::string> seen;
+    for (const auto& enemy : params.Enemies) {
+        const std::string enemyId = enemy.ToString();
+        if (!EnemyDropShuffle::IsEligibleEnemy(enemyId) && seen.insert(enemyId).second) {
+            enemies.push_back(enemy);
         }
     }
+    for (const auto& enemyId : EnemyDropShuffle::GetItemDroppers(params.ItemID.ToString())) {
+        if (seen.insert(enemyId).second) enemies.push_back(FNameFromString(enemyId));
+    }
 
+    if (static_cast<SDK::int32>(enemies.size()) > params.Enemies.MaxElements) {
+        auto* dropManager = SDK::UPBDropManager::GetDropManager();
+        SDK::TArray<SDK::FName> replacement;
+        if (dropManager && dropManager->DropTable) {
+            SDK::UDataTableFunctionLibrary::GetDataTableRowNames(dropManager->DropTable, &replacement);
+        }
+        if (static_cast<SDK::int32>(enemies.size()) > replacement.MaxElements) {
+            Logger::Log(LogLevel::File, "[DropShuffle] Could not resize item dropper archive output for:",
+                        params.ItemID.ToString(), "needed:", enemies.size());
+            return;
+        }
+
+        SDK::TArray<SDK::FName> old = params.Enemies;
+        params.Enemies = replacement;
+        replacement = old;
+        // Array_Clear is an engine-owned deallocation path. FName is trivially
+        // destructible, so the generated wildcard wrapper's int element type is safe here.
+        SDK::UKismetArrayLibrary::Array_Clear(
+            reinterpret_cast<const SDK::TArray<SDK::int32>&>(replacement));
+    }
+
+    params.Enemies.NumElements = static_cast<SDK::int32>(enemies.size());
+    for (SDK::int32 index = 0; index < params.Enemies.NumElements; ++index) {
+        params.Enemies.Data[index] = enemies[index];
+    }
+}
+
+void UnlockGebelGlassesChestAfterDenAccess() {
+    auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
+    auto* roomManager = GameManager::Instance().RoomManager();
+    auto* mapManager = gameInstance ? gameInstance->pMapManager : nullptr;
+    if (!gameInstance || !roomManager || !mapManager) return;
+
+    const auto glassesUnlock = FNameFromString("GotAllShard");
+    if (gameInstance->GetGimmickCategoryFlag(glassesUnlock)) return;
+
+    const std::string currentRoom = roomManager->GetCurrentRoomId().ToString();
+    bool denAccessProven = currentRoom.starts_with("m10BIG_");
+    if (!denAccessProven) {
+        // Acknowledged rooms are persistent save state, unlike the similarly named fake-moon gimmick flags.
+        // Checking several ordinary Den rooms makes this migrate existing saves even when they load in town.
+        for (const char* room : {"m10BIG_002", "m10BIG_005", "m10BIG_006", "m10BIG_007"}) {
+            if (mapManager->IsRoomAcknowledged(FNameFromString(room))) {
+                denAccessProven = true;
+                break;
+            }
+        }
+    }
+    if (!denAccessProven) return;
+
+    gameInstance->SetGimmickCategoryFlag(glassesUnlock, true);
+    Logger::Log(LogLevel::File,
+                "[AP] Enabled the Gebel's Glasses chest after persistent Den access was confirmed");
+}
+
+}  // namespace
+
+void HookManager::ResetShardDropPolicy() {
     auto* dropManager = SDK::UPBDropManager::GetDropManager();
     if (dropManager && dropManager->DropTable) {
         for (const auto& [rowName, dropFlag] : originalRandomizedDropFlags) {
@@ -282,45 +321,18 @@ void HookManager::ResetCompatibilityShardMasterData() {
     }
 }
 
-void HookManager::ApplyCompatibilityShardMasterData() {
+void HookManager::ApplyShardDropPolicy() {
     auto* archipelago = Archipelago::ConnectedInstance();
+    ResetShardDropPolicy();
     if (!archipelago) return;
 
-    ResetCompatibilityShardMasterData();
-
-    auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
-    if (!gameInstance) return;
-    auto* shardManager = gameInstance->GetShardManager();
-    if (!shardManager || !shardManager->ShardMasterTable) return;
     auto* dropManager = SDK::UPBDropManager::GetDropManager();
 
+    const bool shuffleShards = archipelago->IsShardShuffleEnabled();
     const bool autoSellRepeatedShards = QualityOfLife::Instance().IsAutoSellWastedShardsEnabled();
-    size_t compatibilityRows = 0;
     size_t unsuppressedDropRows = 0;
     for (const auto& [randomizedName, vanillaName] : knownVanillaShardIds) {
-        SDK::FName vanillaShardId = FNameFromString(vanillaName);
-        ItemLookupResult itemResult = GetVanillaShardItemSupport(*archipelago, vanillaShardId);
-        if (itemResult == ItemLookupResult::NotReady) {
-            ResetCompatibilityShardMasterData();
-            return;
-        }
-        const bool needsCompatibility = itemResult == ItemLookupResult::UnknownItem;
-
-        if (needsCompatibility) {
-            auto* randomizedRow = FindShardMasterRow(shardManager->ShardMasterTable, randomizedName);
-            auto* vanillaRow = FindShardMasterRow(shardManager->ShardMasterTable, vanillaName);
-            if (randomizedRow && vanillaRow) {
-                originalRandomizedShardAppearances[randomizedName] =
-                    ShardAppearance{randomizedRow->ShardType, randomizedRow->ShardColorOverride};
-                randomizedRow->ShardType = vanillaRow->ShardType;
-                randomizedRow->ShardColorOverride = vanillaRow->ShardColorOverride == SDK::EShardColor::None
-                                                          ? DefaultShardColor(vanillaRow->ShardType)
-                                                          : vanillaRow->ShardColorOverride;
-                compatibilityRows++;
-            }
-        }
-
-        if ((needsCompatibility || autoSellRepeatedShards) && dropManager && dropManager->DropTable &&
+        if ((!shuffleShards || autoSellRepeatedShards) && dropManager && dropManager->DropTable &&
             randomizedName.starts_with("AP_")) {
             std::string dropRowName = randomizedName.substr(3);
             auto* dropRow = FindDropMasterRow(dropManager->DropTable, dropRowName);
@@ -332,9 +344,8 @@ void HookManager::ApplyCompatibilityShardMasterData() {
         }
     }
 
-    Logger::Log(LogLevel::File, "[Shard] Applied shard table patches; compatibility rows:",
-                compatibilityRows, "unsuppressed drop rows:", unsuppressedDropRows,
-                "auto-sell repeats:", autoSellRepeatedShards);
+    Logger::Log(LogLevel::File, "[Shard] Applied current shard drop policy; shuffle:", shuffleShards,
+                "unsuppressed drop rows:", unsuppressedDropRows, "auto-sell repeats:", autoSellRepeatedShards);
 }
 
 bool HookManager::Init() {
@@ -399,13 +410,59 @@ bool HookManager::Init() {
 }
 
 bool HookManager::PostInit() {
-    NotifyOnClassFunction("MapManageBlueprint_C", "Event_MapStart",
-                          [](void* obj) { InGameTracker::Instance().ApplyMapMarkers(obj); });
-    NotifyOnClassFunction("MapManageBlueprint_C", "Tick",
-                          [](void* obj) { InGameTracker::Instance().ApplyDeferredGhostMap(obj); });
+    UnlockGebelGlassesChestAfterDenAccess();
+    NotifyOnClassFunctionWithParams(
+        "PBDropManager", "GetItemDroppableEnemies",
+        [](void*, const std::string& functionName, void* rawParams) {
+            if (functionName != "GetItemDroppableEnemies" || !rawParams) return;
+            ReplaceItemDropperOutput(
+                *static_cast<SDK::Params::PBDropManager_GetItemDroppableEnemies*>(rawParams));
+        });
+
+    NotifyOnClassFunction(
+        "LIB_009_Chair_BP_C",
+        "BndEvt__PBET_OnInteractBox_K2Node_ComponentBoundEvent_0_PBETDelegate_OnBeginOverlapPC__DelegateSignature",
+        [](void*) {
+            auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
+            if (!gameInstance) return;
+
+            const auto firstReward = FNameFromString("LIB_009_PushUpOD_First");
+            const auto secondReward = FNameFromString("LIB_009_PushUpOD_Second");
+            if (gameInstance->GetGimmickCategoryFlag(firstReward) &&
+                gameInstance->GetGimmickCategoryFlag(secondReward)) {
+                return;
+            }
+
+            gameInstance->SetGimmickCategoryFlag(firstReward, true);
+            gameInstance->SetGimmickCategoryFlag(secondReward, true);
+        });
+
+    NotifyOnClassFunction("MapManageBlueprint_C", "Event_MapStart", [](void* obj) {
+        InGameTracker::Instance().ReactivateMiniMapForMenu();
+        InGameTracker::Instance().ApplyMapMarkers(obj);
+    });
+    NotifyOnClassFunction("MapManageBlueprint_C", "Tick", [](void* obj) {
+        InGameTracker::Instance().ApplyDeferredGhostMap(obj);
+        // This callback runs after the complete map-manager Tick, including MiniMapBlueprint's internal local-script
+        // Setup/UpdateIcons calls. Reassert custom marker state only after all native reconstruction has finished.
+        InGameTracker::Instance().ReassertMiniMapCustomMarker(nullptr);
+    });
     NotifyOnClassFunction("MiniMapBlueprint_C", "Tick",
                           [](void* obj) { InGameTracker::Instance().ApplyMiniMap(obj); });
-
+    NotifyOnClassFunctionWithParams(
+        "MiniMapBlueprint_C", "OnPaint",
+        [](void* obj, const std::string& functionName, void* rawParams) {
+            if (functionName == "OnPaint") {
+                InGameTracker::Instance().PaintMiniMap(obj, rawParams);
+            }
+        });
+    NotifyOnClassFunctionWithParams(
+        "TotalMapBlueprint_C", "OnPaint",
+        [](void* obj, const std::string& functionName, void* rawParams) {
+            if (functionName == "OnPaint") {
+                InGameTracker::Instance().PaintMiniMap(obj, rawParams);
+            }
+        });
     NotifyOnClassFunctionWithParams(
         "PBCharacterInventoryComponent", "GetItemWithDisplay",
         [](void* obj, const std::string& functionName, void* rawParams) {
@@ -465,8 +522,8 @@ bool HookManager::PostInit() {
     // When player changes room
     NotifyOnClassFunction("PBRoomManager", "OnSerializeGame", [](void* obj) {
         std::string currentRoomId = GameManager::Instance().RoomManager()->GetCurrentRoomId().ToString();
-        SDK::UPBGameInstance in;
         Logger::Log("Changed rooms:", currentRoomId);
+        UnlockGebelGlassesChestAfterDenAccess();
     });
 
     // When player saves
@@ -493,12 +550,7 @@ bool HookManager::PostInit() {
             return;
         }
 
-        ItemLookupResult itemResult = GetVanillaShardItemSupport(*archipelago, *vanillaShardId);
-        if (itemResult == ItemLookupResult::NotReady) {
-            Logger::Log("[Shard] Item data is not ready; leaving shard actor intact:", shardName);
-            return;
-        }
-        if (itemResult == ItemLookupResult::UnknownItem) {
+        if (!archipelago->IsShardShuffleEnabled()) {
             RestoreVanillaShardAppearance(shardBase, *vanillaShardId);
             return;
         }
@@ -552,8 +604,8 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
         Archipelago::Instance().Shutdown();
     }
 
-    // UserConstructionScript selects the shard actor's material. Restore the vanilla
-    // ID before that script runs so compatibility shards use their real category color.
+    // UserConstructionScript selects the shard actor's material. In current-schema
+    // vanilla-shard mode, restore the native ID before that selection runs.
     if (functionName == "UserConstructionScript" && obj->Class->Name.ToString() == "PurpleShard_C") {
         auto* shardBase = static_cast<SDK::AShardBase*>(obj);
         std::string shardName = shardBase->ShardId.ToString();
@@ -563,8 +615,7 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
         auto vanillaShardId = ResolveVanillaShardId(shardBase->ShardId);
         if (!vanillaShardId) return;
 
-        ItemLookupResult itemResult = GetVanillaShardItemSupport(*archipelago, *vanillaShardId);
-        if (itemResult != ItemLookupResult::UnknownItem) return;
+        if (archipelago->IsShardShuffleEnabled()) return;
 
         RestoreVanillaShardAppearance(shardBase, *vanillaShardId);
         return;
@@ -583,8 +634,7 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
         return;
     }
 
-    ItemLookupResult itemResult = GetVanillaShardItemSupport(*archipelago, *vanillaShardId);
-    if (itemResult != ItemLookupResult::UnknownItem) return;
+    if (archipelago->IsShardShuffleEnabled()) return;
 
     crystallizeParams->DropShardId = *vanillaShardId;
 }

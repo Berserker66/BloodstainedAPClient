@@ -124,18 +124,16 @@
       <AdditionalIncludeDirectories>CppSDK/SDK;subprojects/json/include;subprojects/valijson/include;subprojects/wswrap/include;subprojects/websocketpp;subprojects/asio/asio/include;subprojects/asio/include;subprojects/apclientpp;.;CppSDK;extern;extern/libdetour;extern/imgui;extern/imgui/backends;extern/kiero;extern/minhook/include;extern/minhook/src;vcpkg_installed\x64-windows-static-md\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:__cplusplus /bigobj /experimental:deterministic /pathmap:$(ProjectDir)= %(AdditionalOptions)</AdditionalOptions>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ForceSynchronousPDBWrites>true</ForceSynchronousPDBWrites>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>version\version.def</ModuleDefinitionFile>
       <AdditionalLibraryDirectories>vcpkg_installed\x64-windows-static-md\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>vcpkg_installed\x64-windows-static-md\lib\libcrypto.lib;vcpkg_installed\x64-windows-static-md\lib\libssl.lib;vcpkg_installed\x64-windows-static-md\lib\zlib.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>vcpkg_installed\x64-windows-static-md\lib\libcrypto.lib;vcpkg_installed\x64-windows-static-md\lib\libssl.lib;vcpkg_installed\x64-windows-static-md\lib\zs.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>if not exist "$(BSGamePath)\plugins\" mkdir "$(BSGamePath)\plugins"
-copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -150,18 +148,16 @@ copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
       <AdditionalOptions>/Zc:__cplusplus /bigobj /experimental:deterministic /pathmap:$(ProjectDir)= %(AdditionalOptions)</AdditionalOptions>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <Optimization>MaxSpeed</Optimization>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ForceSynchronousPDBWrites>true</ForceSynchronousPDBWrites>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>version\version.def</ModuleDefinitionFile>
       <AdditionalLibraryDirectories>vcpkg_installed\x64-windows-static-md\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>vcpkg_installed\x64-windows-static-md\lib\libcrypto.lib;vcpkg_installed\x64-windows-static-md\lib\libssl.lib;vcpkg_installed\x64-windows-static-md\lib\zlib.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>vcpkg_installed\x64-windows-static-md\lib\libcrypto.lib;vcpkg_installed\x64-windows-static-md\lib\libssl.lib;vcpkg_installed\x64-windows-static-md\lib\zs.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>if not exist "$(BSGamePath)\plugins\" mkdir "$(BSGamePath)\plugins"
-copy /Y "$(TargetPath)" "$(BSGamePath)\plugins\$(TargetFileName)"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CppSDK\SDK\Basic.cpp" />

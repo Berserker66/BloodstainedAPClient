@@ -2,10 +2,10 @@
 
 #include <cstdint>
 #include <atomic>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 enum class TrackerDisplayMode : std::int32_t {
@@ -20,28 +20,9 @@ struct TrackedWidgetHandle {
     std::int32_t objectIndex = -1;
 };
 
-enum class MiniMapOverlayMarkerKind : std::uint8_t {
-    CHEST,
-    WALL,
-    SHARD,
-};
-
-struct MiniMapOverlayMarker {
-    MiniMapOverlayMarkerKind kind = MiniMapOverlayMarkerKind::WALL;
-    float centerX = 0.0f;
-    float centerY = 0.0f;
-    float width = 0.0f;
-    float height = 0.0f;
-};
-
-struct MiniMapOverlaySnapshot {
-    bool visible = false;
-    float clipLeft = 0.0f;
-    float clipTop = 0.0f;
-    float clipRight = 0.0f;
-    float clipBottom = 0.0f;
-    std::uint64_t updatedAtMilliseconds = 0;
-    std::vector<MiniMapOverlayMarker> markers;
+struct ReachableRoomCell {
+    std::string room;
+    std::uint32_t assignment = 0;
 };
 
 class InGameTracker {
@@ -51,7 +32,9 @@ class InGameTracker {
     void ApplyDeferredGhostMap(void* mapWidget);
     void ApplyMapMarkers(void* mapWidget);
     void ApplyMiniMap(void* miniMapWidget);
-    MiniMapOverlaySnapshot GetMiniMapOverlaySnapshot() const;
+    void ReassertMiniMapCustomMarker(void* miniMapWidget);
+    void ReactivateMiniMapForMenu();
+    void PaintMiniMap(void* miniMapWidget, void* paintParams);
     TrackerDisplayMode GetDisplayMode() const { return displayMode_.load(); }
     void InvalidateReachability(std::string_view reason);
     void LoadDisplayMode();
@@ -65,19 +48,22 @@ class InGameTracker {
     InGameTracker() = default;
 
     void ClearMainMapMarkers();
-    void ClearMiniMapMarkers();
+    void ClearMiniMapMarkers(bool clearGhosts = true);
     bool IsMainMapEnabled() const;
     bool IsMiniMapEnabled() const;
 
     bool inventorySynchronized_ = false;
     bool reachabilityDirty_ = true;
     bool miniMapDirty_ = true;
+    bool miniMapGhostsDirty_ = true;
     void* pendingGhostMap_ = nullptr;
+    void* activeMainMap_ = nullptr;
     void* activeMiniMap_ = nullptr;
+    std::int32_t activeMiniMapIndex_ = -1;
     void* activeMiniMapCanvas_ = nullptr;
-    TrackedWidgetHandle miniMapGhostPanel_;
-    TrackedWidgetHandle miniMapIconPanel_;
+    std::int32_t activeMiniMapCanvasIndex_ = -1;
     std::int32_t activeMiniMapType_ = -1;
+    bool mainMapDirty_ = true;
     std::atomic<TrackerDisplayMode> displayMode_{TrackerDisplayMode::FULL};
     std::vector<TrackedWidgetHandle> spawnedMainMapGhostWidgets_;
     std::vector<TrackedWidgetHandle> activatedNativeMarkerWidgets_;
@@ -85,12 +71,36 @@ class InGameTracker {
     std::vector<TrackedWidgetHandle> activatedMiniMapMarkerWidgets_;
     std::vector<TrackedWidgetHandle> miniMapVisibilityWidgets_;
     std::vector<TrackedWidgetHandle> spawnedMiniMapWidgets_;
+    std::vector<TrackedWidgetHandle> spawnedMiniMapGhostWidgets_;
     std::unordered_set<std::uint64_t> pendingWallLocationIds_;
     std::unordered_set<std::string> pendingSyntheticTreasureIds_;
+    std::unordered_set<std::string> pendingShardRooms_;
     std::unordered_set<std::uint64_t> miniMapWallLocationIds_;
     std::unordered_set<std::string> miniMapShardRooms_;
     std::unordered_set<std::string> miniMapTreasureIds_;
     std::unordered_set<std::string> reachableRooms_;
-    mutable std::mutex miniMapOverlayMutex_;
-    MiniMapOverlaySnapshot miniMapOverlaySnapshot_;
+    std::vector<ReachableRoomCell> reachableCells_;
+    void* miniMapChestBrush_ = nullptr;
+    std::int32_t miniMapChestBrushIndex_ = -1;
+    void* miniMapChestTexture_ = nullptr;
+    std::int32_t miniMapChestTextureIndex_ = -1;
+    void* miniMapWallBrush_ = nullptr;
+    std::int32_t miniMapWallBrushIndex_ = -1;
+    void* miniMapWallTexture_ = nullptr;
+    std::int32_t miniMapWallTextureIndex_ = -1;
+    void* miniMapShardBrush_ = nullptr;
+    std::int32_t miniMapShardBrushIndex_ = -1;
+    void* miniMapShardTexture_ = nullptr;
+    std::int32_t miniMapShardTextureIndex_ = -1;
+    bool miniMapCanvasCalibrationValid_ = false;
+    float miniMapCanvasCalibrationX_ = 0.0f;
+    float miniMapCanvasCalibrationY_ = 0.0f;
+    float miniMapCalibrationMapX_ = 0.0f;
+    float miniMapCalibrationMapY_ = 0.0f;
+    float miniMapCalibrationAnchorPanelX_ = 0.0f;
+    float miniMapCalibrationAnchorPanelY_ = 0.0f;
+    float miniMapCalibrationCandidatePanelX_ = 0.0f;
+    float miniMapCalibrationCandidatePanelY_ = 0.0f;
+    std::uint8_t miniMapCalibrationStableFrames_ = 0;
+    bool miniMapPaintRefreshRequested_ = false;
 };

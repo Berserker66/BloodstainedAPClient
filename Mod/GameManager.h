@@ -22,7 +22,7 @@
 #include "PB_Chr_Root_classes.hpp"
 #include "ProjectBlood_classes.hpp"
 
-enum class ItemGrantResult { Granted, AtCapacity, Rejected };
+enum class ItemGrantResult { Granted, AtCapacity, Unsupported, Rejected };
 
 class GameManager {
    public:

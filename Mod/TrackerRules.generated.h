@@ -12,7 +12,7 @@ using ::bloodstained::tracker::ItemRequirement;
 using ::bloodstained::tracker::RuleNode;
 using ::bloodstained::tracker::RuleOperation;
 
-inline constexpr std::array<std::string_view, 18> ITEMS = {{
+inline constexpr std::array<std::string_view, 21> ITEMS = {{
     "Dimension Shift",
     "High Jump",
     "Invert",
@@ -26,14 +26,17 @@ inline constexpr std::array<std::string_view, 18> ITEMS = {{
     "Aegis Plate",
     "Blood Steal",
     "Craftwork",
-    "Zangetsuto",
+    "Den Portal Open",
+    "Journey Available",
     "Silver Bromide",
     "Crown of Creation",
     "Aqua Stream",
     "Deep Sinker",
+    "Victory",
+    "Zangetsuto",
 }};
 
-inline constexpr std::array<ItemRequirement, 28> REQUIREMENTS = {{
+inline constexpr std::array<ItemRequirement, 33> REQUIREMENTS = {{
     ItemRequirement{0u, 1u},
     ItemRequirement{1u, 1u},
     ItemRequirement{2u, 1u},
@@ -60,8 +63,13 @@ inline constexpr std::array<ItemRequirement, 28> REQUIREMENTS = {{
     ItemRequirement{15u, 1u},
     ItemRequirement{16u, 1u},
     ItemRequirement{17u, 1u},
+    ItemRequirement{18u, 1u},
     ItemRequirement{2u, 1u},
-    ItemRequirement{17u, 1u},
+    ItemRequirement{18u, 1u},
+    ItemRequirement{1u, 1u},
+    ItemRequirement{2u, 1u},
+    ItemRequirement{19u, 1u},
+    ItemRequirement{20u, 1u},
 }};
 
 inline constexpr std::array<std::uint32_t, 105> OPERANDS = {{
@@ -149,30 +157,30 @@ inline constexpr std::array<std::uint32_t, 105> OPERANDS = {{
     25u,
     3u,
     8u,
-    53u,
     54u,
-    53u,
+    55u,
+    54u,
     8u,
-    53u,
+    54u,
     4u,
-    53u,
+    54u,
     8u,
     16u,
-    56u,
+    57u,
     8u,
-    56u,
+    57u,
     2u,
-    60u,
     61u,
+    62u,
     8u,
-    61u,
-    53u,
+    62u,
+    54u,
     8u,
-    64u,
-    61u,
+    65u,
+    62u,
 }};
 
-inline constexpr std::array<RuleNode, 66> NODES = {{
+inline constexpr std::array<RuleNode, 70> NODES = {{
     RuleNode{RuleOperation::ALWAYS, 0u, 0u, 0u},
     RuleNode{RuleOperation::HAS_ANY, 0u, 3u, 0u},
     RuleNode{RuleOperation::HAS_ALL, 3u, 1u, 0u},
@@ -221,15 +229,16 @@ inline constexpr std::array<RuleNode, 66> NODES = {{
     RuleNode{RuleOperation::OR, 64u, 2u, 0u},
     RuleNode{RuleOperation::OR, 66u, 2u, 0u},
     RuleNode{RuleOperation::OR, 68u, 4u, 0u},
-    RuleNode{RuleOperation::OR, 72u, 4u, 0u},
     RuleNode{RuleOperation::HAS_ALL, 22u, 1u, 0u},
+    RuleNode{RuleOperation::OR, 72u, 4u, 0u},
     RuleNode{RuleOperation::HAS_ALL, 23u, 1u, 0u},
+    RuleNode{RuleOperation::HAS_ALL, 24u, 1u, 0u},
     RuleNode{RuleOperation::OR, 76u, 3u, 0u},
     RuleNode{RuleOperation::OR, 79u, 3u, 0u},
-    RuleNode{RuleOperation::HAS_ANY, 24u, 3u, 0u},
+    RuleNode{RuleOperation::HAS_ANY, 25u, 3u, 0u},
     RuleNode{RuleOperation::AND, 82u, 2u, 0u},
     RuleNode{RuleOperation::OR, 84u, 2u, 0u},
-    RuleNode{RuleOperation::HAS_ALL, 27u, 1u, 0u},
+    RuleNode{RuleOperation::HAS_ALL, 28u, 1u, 0u},
     RuleNode{RuleOperation::OR, 86u, 2u, 0u},
     RuleNode{RuleOperation::OR, 88u, 2u, 0u},
     RuleNode{RuleOperation::OR, 90u, 3u, 0u},
@@ -239,6 +248,9 @@ inline constexpr std::array<RuleNode, 66> NODES = {{
     RuleNode{RuleOperation::OR, 99u, 2u, 0u},
     RuleNode{RuleOperation::AND, 101u, 2u, 0u},
     RuleNode{RuleOperation::OR, 103u, 2u, 0u},
+    RuleNode{RuleOperation::HAS_ANY, 29u, 2u, 0u},
+    RuleNode{RuleOperation::HAS_ALL, 31u, 1u, 0u},
+    RuleNode{RuleOperation::HAS_ALL, 32u, 1u, 0u},
 }};
 
 }  // namespace bloodstained::tracker::generated

@@ -21,6 +21,71 @@
 
 #define PLAYER_NAME "Chr_P0000_C_0"
 
+namespace {
+
+enum class PaidDlcItemPreparation { Ready, NotOwned, NotReady };
+
+PaidDlcItemPreparation PrepareOwnedIgaCatalogRow(const std::string& itemId) {
+    auto* dlcManager = SDK::UPBDLCManager::GetInstance();
+    if (!dlcManager) return PaidDlcItemPreparation::NotReady;
+    const auto igaDlc = FNameFromString("DLC_0002");
+    if (!dlcManager->HasDLC(igaDlc)) {
+        Logger::Log(LogLevel::File, "[AP] Paid IGA item is unsupported without DLC_0002:", itemId);
+        return PaidDlcItemPreparation::NotOwned;
+    }
+
+    auto* itemTable = SDK::UPBDataTableManager::GetLoadedDataTable(SDK::EPBDataTables::ItemMaster);
+    if (!itemTable) return PaidDlcItemPreparation::NotReady;
+    const auto expectedCategory = itemId == "SwordWhip" ? SDK::ECarriedCatalog::Weapon
+                                                        : SDK::ECarriedCatalog::TriggerShard;
+    for (const auto& pair : itemTable->RowMap) {
+        if (pair.Key().ToString() != itemId) continue;
+        auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
+        if (!row) return PaidDlcItemPreparation::NotReady;
+        if (row->ItemType == SDK::ECarriedCatalog::None) {
+            // Schema-1's base/free static pak disables IGA's paid inventory rows. An early schema-1 APWorld
+            // accidentally admitted IGA items anyway. Restore the native category only for an owner of the
+            // matching DLC so those already-generated multiworlds can deliver their published items safely.
+            row->ItemType = expectedCategory;
+            Logger::Log(LogLevel::File, "[AP] Restored owned IGA ItemMaster category for legacy delivery:", itemId);
+        }
+        return row->ItemType == expectedCategory ? PaidDlcItemPreparation::Ready
+                                                 : PaidDlcItemPreparation::NotReady;
+    }
+    return PaidDlcItemPreparation::NotReady;
+}
+
+void RemoveArchipelagoPlaceholderShards() {
+    auto* player = GameManager::Instance().Player();
+    if (!player || !player->CharacterInventory) return;
+    auto* inventory = player->CharacterInventory;
+
+    std::vector<std::pair<SDK::FName, int32_t>> placeholders;
+    auto collect = [&placeholders](const SDK::TArray<SDK::FPBItemCatalogData>& items) {
+        for (const auto& item : items) {
+            if (item.ID.ToString().starts_with("AP_")) {
+                placeholders.emplace_back(item.ID, std::max(1, item.Num));
+            }
+        }
+    };
+    collect(inventory->myTriggerShards);
+    collect(inventory->myEffectiveShards);
+    collect(inventory->myDirectionalShards);
+    collect(inventory->myEnchantShards);
+    collect(inventory->myFamiliarShards);
+    collect(inventory->mySkills);
+
+    int removed = 0;
+    for (const auto& [itemId, quantity] : placeholders) {
+        if (inventory->RemoveItem(itemId, quantity, false)) removed++;
+    }
+    if (removed > 0) {
+        Logger::Log(LogLevel::File, "[AP] Removed leaked location-placeholder shards from inventory:", removed);
+    }
+}
+
+}  // namespace
+
 GameManager& GameManager::Instance() {
     static GameManager instance;
     return instance;
@@ -64,6 +129,16 @@ bool GameManager::PopulateDisplayToItemIdTable() {
         SDK::FPBItemCatalogData itemData = SDK::FPBItemCatalogData();
 
         inventory->GetItemDataById(itemName, &itemData);
+        std::string lowerItemId = itemId;
+        std::ranges::transform(lowerItemId, lowerItemId.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lowerItemId.find("swordwhip") != std::string::npos ||
+            lowerItemId.find("sword_whip") != std::string::npos) {
+            Logger::Log(LogLevel::File, "[AP] Live Sword Whip ItemMaster candidate; row:", itemId,
+                        "resolved ID:", itemData.ID.ToString(), "display:", itemData.Name.ToString(),
+                        "category:", static_cast<int>(itemData.itemCategory), "quantity:", itemData.Num,
+                        "maximum:", itemData.MaxNum);
+        }
         if (itemData.Name.ToString().empty()) continue;
         if (itemData.Name.ToString().starts_with("AP_")) continue;
         if (DisplayNameToItemId.count(itemData.Name.ToString()) >= 1) continue;
@@ -118,7 +193,10 @@ bool GameManager::PostInit() {
     // ProcessNamePool();
     Logger::Log("Populated Display Table");
     Sleep(200);
-    ThreadQueue::Instance().Enqueue([this] { GameManager::Instance().PopulateDisplayToItemIdTable(); });
+    ThreadQueue::Instance().Enqueue([this] {
+        RemoveArchipelagoPlaceholderShards();
+        GameManager::Instance().PopulateDisplayToItemIdTable();
+    });
     // GameManager::Instance().PopulateDisplayToItemIdTable();
     Logger::Log("Game Manager POST initialized successfully");
     postInitCompleted = true;
@@ -344,6 +422,19 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
 
         auto* inventory = gameManager.Player()->CharacterInventory;
         auto itemName = FNameFromString(name);
+        if (name == "SwordWhip" || name == "NeverSatisfied") {
+            const auto preparation = PrepareOwnedIgaCatalogRow(name);
+            if (preparation != PaidDlcItemPreparation::Ready) {
+                // Old or already-generated multiworlds can still contain IGA's paid-DLC items. A missing
+                // entitlement is permanent and must not block later deliveries; unavailable native state is
+                // transient and remains retryable.
+                if (completion) {
+                    completion(preparation == PaidDlcItemPreparation::NotOwned ? ItemGrantResult::Unsupported
+                                                                              : ItemGrantResult::Rejected);
+                }
+                return;
+            }
+        }
         SDK::FPBItemCatalogData itemData{};
         inventory->GetItemDataById(itemName, &itemData);
 
@@ -359,9 +450,22 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
             }
         }
 
-        const bool nativeGrantAccepted = inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
-        const auto itemAfterGrant = gameManager.CheckAllInventories(name);
-        const bool inventoryUpdated = itemAfterGrant && itemAfterGrant->Num > previousCount;
+        bool nativeGrantAccepted = inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
+        auto itemAfterGrant = gameManager.CheckAllInventories(name);
+        bool inventoryUpdated = itemAfterGrant && itemAfterGrant->Num > previousCount;
+
+        // Some special equipment (notably the IGA DLC Sword Whip) is present in ItemMaster and has a valid
+        // protocol mapping, but rejects the ordinary display-grant route. Native pickups for those rows use
+        // GetItemWrap instead. Only try that route after proving the first call did not change inventory so a
+        // false return value from GetItemWithDisplay can never result in a duplicate award.
+        if (!inventoryUpdated && name == "SwordWhip" && count > 0) {
+            const bool wrappedGrantAccepted = inventory->GetItemWrap(itemName, gameManager.Player());
+            itemAfterGrant = gameManager.CheckAllInventories(name);
+            inventoryUpdated = itemAfterGrant && itemAfterGrant->Num > previousCount;
+            nativeGrantAccepted = nativeGrantAccepted || wrappedGrantAccepted;
+            Logger::Log(LogLevel::File, "[AP] Native wrapped-item grant fallback:", name,
+                        "accepted:", wrappedGrantAccepted, "inventory updated:", inventoryUpdated);
+        }
         if (nativeGrantAccepted && !inventoryUpdated) {
             Logger::Log(LogLevel::File, "[AP] Native item grant reported success without updating inventory:",
                         name, "previous count:", previousCount,

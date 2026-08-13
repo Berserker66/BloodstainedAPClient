@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -109,7 +110,7 @@ constexpr std::array<std::string_view, 90> CHECKED_SNAPSHOT = {{
     "Treasurebox_SAN014_1", "Treasurebox_UGD036_1.0", "Treasurebox_UGD036_1.1",
     "Treasurebox_UGD036_1.2", "Treasurebox_UGD036_1.3", "Treasurebox_UGD036_2", "Wall_SIP009_1",
     "Wall_SIP016_1", "Wall_ENT012_1", "Wall_SAN000_1", "Treasurebox_SIP019_1", "Treasurebox_SIP021_2",
-    "Treasurebox_SIP025_1", "Treasurebox_VIL001_1", "Treasurebox_ENT002_2", "Treasurebox_ENT004_1",
+    "Treasurebox_SIP025_1", "Treasurebox_VIL001_1", "Treasurebox_ENT002_3", "Treasurebox_ENT004_1",
 }};
 
 std::unordered_set<std::string_view> ReachableLocationNames(const Tracker& tracker, Difficulty difficulty) {
@@ -155,15 +156,15 @@ void TestRealSnapshot() {
     std::cout << "Reachable locations for supplied inventory: normal=" << normal.size() << ", hard=" << hard.size()
               << ", nightmare=" << nightmare.size() << '\n';
 
-    std::size_t reachable_checked = 0;
+    std::unordered_set<std::string_view> unavailable_checked;
     for (std::string_view checked : CHECKED_SNAPSHOT) {
-        if (hard.contains(checked)) {
-            ++reachable_checked;
-            continue;
-        }
+        if (!hard.contains(checked)) unavailable_checked.insert(checked);
+    }
+    for (std::string_view checked : unavailable_checked) {
         std::cout << "Checked by the older snapshot but outside current Hard logic: " << checked << '\n';
     }
-    Check(reachable_checked == 89, "True Randomizer door logic reaches 89 of the 90 checked snapshot locations");
+    Check(unavailable_checked.empty(),
+          "current logic reaches every location checked by the True Randomizer snapshot");
 
     std::unordered_map<std::string, std::uint32_t> complete_inventory;
     for (std::string_view item : bloodstained::tracker::generated::ITEMS) complete_inventory.emplace(item, 1);
@@ -267,6 +268,37 @@ void TestGeneratedMapData() {
               "canonical chest location resolves back to its native protocol name");
     }
 
+    const auto* hidden_room_left = FindLocationByNativeName("Treasurebox_SIP025_1.0");
+    const auto* hidden_room_right = FindLocationByNativeName("Treasurebox_SIP025_2.0");
+    Check(hidden_room_left && hidden_room_left->has_map_position,
+          "Galleon hidden-room left chest has an authoritative map position");
+    Check(hidden_room_right && hidden_room_right->has_map_position,
+          "Galleon hidden-room right chest has an authoritative map position");
+    if (hidden_room_left && hidden_room_right) {
+        Check(hidden_room_left->map_x > 0.42f && hidden_room_left->map_x < 0.44f,
+              "Galleon hidden-room left chest uses its cooked actor position");
+        Check(hidden_room_right->map_x > 0.79f && hidden_room_right->map_x < 0.80f,
+              "Galleon hidden-room right chest uses its cooked actor position");
+        Check(hidden_room_left->map_x < hidden_room_right->map_x,
+              "Galleon hidden-room chest markers preserve left-to-right order");
+    }
+
+    constexpr std::array synthetic_capacity_pickups = {
+        std::pair{"Treasurebox_ENT014_2.0", std::pair{1.380952f, 0.083333f}},
+        std::pair{"Treasurebox_ENT014_3.0", std::pair{0.626984f, 1.083333f}},
+        std::pair{"Treasurebox_GDN002_1.0", std::pair{0.142857f, 0.833333f}},
+    };
+    for (const auto& [native_name, expected_position] : synthetic_capacity_pickups) {
+        const auto* location = FindLocationByNativeName(native_name);
+        Check(location && location->has_map_position,
+              "capacity pickup omitted from native marker arrays has a synthetic map position");
+        if (!location) continue;
+        Check(std::abs(location->map_x - expected_position.first) < 0.00001f,
+              "synthetic capacity pickup uses its cooked horizontal actor position");
+        Check(std::abs(location->map_z - expected_position.second) < 0.00001f,
+              "synthetic capacity pickup uses its cooked vertical actor position");
+    }
+
     const auto* shard = FindLocationByNativeName("N3007_Shard");
     Check(shard != nullptr, "shard fixture exists");
     if (shard != nullptr) {
@@ -282,6 +314,18 @@ void TestGeneratedMapData() {
         });
     Check(all_locations_have_native_names,
           "every player-facing tracker location resolves to a native protocol name");
+
+    constexpr std::int32_t TRAVERSE_WIDTH = 200;
+    constexpr std::int32_t TRAVERSE_HEIGHT = 100;
+    constexpr std::int32_t ROOM_MAP_TO_TRAVERSE_Z = 50;
+    for (const auto& room : bloodstained::tracker::generated::ROOMS) {
+        if (room.out_of_map) continue;
+        Check(room.x >= 0 && room.x + room.width <= TRAVERSE_WIDTH,
+              "visible room geometry fits the traversal ledger horizontally");
+        Check(room.z + ROOM_MAP_TO_TRAVERSE_Z >= 0 &&
+                  room.z + ROOM_MAP_TO_TRAVERSE_Z + room.height <= TRAVERSE_HEIGHT,
+              "visible room geometry fits the traversal ledger vertically");
+    }
 }
 
 void TestGalleonOpeningHeightGate() {
@@ -299,6 +343,40 @@ void TestGalleonOpeningHeightGate() {
           "Double Jump opens the upper room above the Galleon spawn");
     Check(with_double_jump.contains("Treasurebox_SIP024_2"),
           "Double Jump opens both chests above the Galleon spawn");
+}
+
+void TestShardRoomCoverage() {
+    Tracker tracker;
+    std::unordered_map<std::string, std::uint32_t> complete_inventory;
+    for (const std::string_view item : bloodstained::tracker::generated::ITEMS) {
+        complete_inventory.emplace(item, 99u);
+    }
+    tracker.SetInventory(complete_inventory);
+
+    const auto* shard = FindLocationByNativeName("N3109_Shard");
+    Check(shard != nullptr, "Livre shard-room fixture exists");
+    if (!shard) return;
+    const auto rooms = tracker.GetReachableEnemyRooms(*shard, Difficulty::NORMAL);
+    for (const std::string_view expected : {
+             "m07LIB_012", "m07LIB_015", "m07LIB_020", "m07LIB_034"}) {
+        Check(std::ranges::find(rooms, expected) != rooms.end(),
+              "all base Livre rooms containing the shard enemy are exported");
+    }
+}
+
+void TestScriptedAreaGates() {
+    Tracker tracker;
+    tracker.SetInventory({{"Zangetsuto", 1}});
+    const auto zangetsuto_only = tracker.GetReachableRooms(Difficulty::NORMAL);
+    Check(!std::ranges::any_of(zangetsuto_only, [](const auto* room) { return room->name.starts_with("m10BIG_"); }),
+          "Zangetsuto alone does not open the Den portal");
+    Check(!std::ranges::any_of(zangetsuto_only, [](const auto* room) { return room->name.starts_with("m20JRN_"); }),
+          "Zangetsuto alone does not light The Tunnels through the Den");
+
+    tracker.SetInventory({{"Den Portal Open", 1}});
+    const auto injected_event = tracker.GetReachableRooms(Difficulty::NORMAL);
+    Check(!std::ranges::any_of(injected_event, [](const auto* room) { return room->name.starts_with("m10BIG_"); }),
+          "derived tracker events cannot be injected as player inventory");
 }
 
 std::uint64_t HashDropShuffle(const bloodstained::enemy_drop_shuffle::ShuffleResult& result) {
@@ -356,6 +434,8 @@ int main() {
     TestRealSnapshot();
     TestGeneratedMapData();
     TestGalleonOpeningHeightGate();
+    TestShardRoomCoverage();
+    TestScriptedAreaGates();
     TestEnemyDropShuffle();
     if (failures != 0) {
         std::cerr << failures << " tracker test(s) failed\n";

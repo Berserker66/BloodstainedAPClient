@@ -35,7 +35,13 @@ class Tracker {
     static bool IsTraversalItem(std::string_view name);
 
    private:
-    bool IsRuleSatisfied(std::uint32_t rule) const;
+    struct ReachabilityState {
+        std::vector<bool> regions;
+        std::vector<std::uint32_t> inventory;
+    };
+
+    ReachabilityState EvaluateReachability(Difficulty difficulty) const;
+    static bool IsRuleSatisfied(std::uint32_t rule, const std::vector<std::uint32_t>& inventory);
     static bool IncludesDifficulty(std::uint8_t mask, Difficulty difficulty);
 
     std::vector<std::uint32_t> inventory_ = std::vector<std::uint32_t>(generated::ITEMS.size(), 0);

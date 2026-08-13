@@ -29,6 +29,10 @@ void Logger::Init() {
     logPath = std::filesystem::path(localAppData) / L"BloodstainedRotN" / L"Saved" / L"Logs" /
               L"BloodstainedAP.log";
     std::filesystem::create_directories(logPath.parent_path());
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        std::ofstream file(logPath, std::ios_base::trunc);
+    }
     WriteFile("--- BloodstainedAP session started ---");
 }
 

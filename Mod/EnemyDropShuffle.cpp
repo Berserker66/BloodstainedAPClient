@@ -6,6 +6,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "EnemyDropShuffleLogic.h"
 #include "Logger.h"
@@ -15,6 +16,94 @@ namespace {
 
 SDK::UDataTable* originalDropTable = nullptr;
 std::unordered_map<std::string, SDK::FPBDropRateMasterData> originalRows;
+SDK::UPBDropManager* originalItemDropperManager = nullptr;
+std::unordered_map<std::string, std::vector<std::string>> originalItemDroppers;
+bool shuffleApplied = false;
+std::unordered_set<std::string> eligibleEnemies;
+std::unordered_map<std::string, std::vector<std::string>> shuffledItemDroppers;
+
+bool ReplaceEnemyArray(SDK::UPBDropManager& dropManager, SDK::TArray<SDK::FName>& target,
+                       const std::vector<std::string>& enemies) {
+    if (static_cast<SDK::int32>(enemies.size()) > target.MaxElements) {
+        SDK::TArray<SDK::FName> replacement;
+        if (dropManager.DropTable) {
+            SDK::UDataTableFunctionLibrary::GetDataTableRowNames(dropManager.DropTable, &replacement);
+        }
+        if (static_cast<SDK::int32>(enemies.size()) > replacement.MaxElements) return false;
+
+        SDK::TArray<SDK::FName> old = target;
+        target = replacement;
+        replacement = old;
+        SDK::UKismetArrayLibrary::Array_Clear(
+            reinterpret_cast<const SDK::TArray<SDK::int32>&>(replacement));
+    }
+
+    target.NumElements = static_cast<SDK::int32>(enemies.size());
+    for (SDK::int32 index = 0; index < target.NumElements; ++index) {
+        target.Data[index] = FNameFromString(enemies[index]);
+    }
+    return true;
+}
+
+void PrepareOriginalItemDroppers(SDK::UPBDropManager& dropManager) {
+    if (&dropManager == originalItemDropperManager) return;
+    originalItemDropperManager = &dropManager;
+    originalItemDroppers.clear();
+    for (const auto& pair : dropManager.ItemDroppers) {
+        auto& enemies = originalItemDroppers[pair.Key().ToString()];
+        for (const auto& enemy : pair.Value().Enemies) enemies.push_back(enemy.ToString());
+    }
+}
+
+void RestoreOriginalItemDroppers(SDK::UPBDropManager& dropManager) {
+    if (&dropManager != originalItemDropperManager) return;
+    for (auto& pair : dropManager.ItemDroppers) {
+        const auto original = originalItemDroppers.find(pair.Key().ToString());
+        if (original != originalItemDroppers.end()) {
+            ReplaceEnemyArray(dropManager, pair.Value().Enemies, original->second);
+        }
+    }
+}
+
+bool SynchronizeItemDroppers(SDK::UPBDropManager& dropManager) {
+    PrepareOriginalItemDroppers(dropManager);
+    std::unordered_set<std::string> synchronizedItems;
+    for (auto& pair : dropManager.ItemDroppers) {
+        const std::string item = pair.Key().ToString();
+        const auto original = originalItemDroppers.find(item);
+        if (original == originalItemDroppers.end()) continue;
+
+        std::vector<std::string> desired;
+        std::unordered_set<std::string> seen;
+        for (const auto& enemy : original->second) {
+            if (!eligibleEnemies.contains(enemy) && seen.insert(enemy).second) desired.push_back(enemy);
+        }
+        const auto shuffled = shuffledItemDroppers.find(item);
+        if (shuffled != shuffledItemDroppers.end()) {
+            synchronizedItems.insert(item);
+            for (const auto& enemy : shuffled->second) {
+                if (seen.insert(enemy).second) desired.push_back(enemy);
+            }
+        }
+        if (!ReplaceEnemyArray(dropManager, pair.Value().Enemies, desired)) {
+            Logger::Log(LogLevel::File, "[DropShuffle] Could not resize authoritative item dropper index for:",
+                        item, "needed:", desired.size());
+            return false;
+        }
+    }
+
+    std::size_t missingItems = 0;
+    for (const auto& [item, enemies] : shuffledItemDroppers) {
+        if (!synchronizedItems.contains(item)) {
+            ++missingItems;
+        }
+    }
+    if (missingItems != 0) {
+        Logger::Log(LogLevel::File,
+                    "[DropShuffle] Shuffled items absent from vanilla item dropper index:", missingItems);
+    }
+    return true;
+}
 
 SDK::int32 RandomIntegerFromStream(SDK::FRandomStream& stream, SDK::int32 maxExclusive) {
     static SDK::UFunction* function = nullptr;
@@ -138,9 +227,24 @@ void PrepareOriginalRows(
 }  // namespace
 
 void EnemyDropShuffle::Reset() {
+    shuffleApplied = false;
+    shuffledItemDroppers.clear();
     auto* dropManager = SDK::UPBDropManager::GetDropManager();
     if (!dropManager) return;
     RestoreOriginalRows(dropManager->DropTable);
+    RestoreOriginalItemDroppers(*dropManager);
+}
+
+bool EnemyDropShuffle::IsApplied() { return shuffleApplied; }
+
+bool EnemyDropShuffle::IsEligibleEnemy(std::string_view enemy) {
+    return eligibleEnemies.contains(std::string(enemy));
+}
+
+const std::vector<std::string>& EnemyDropShuffle::GetItemDroppers(std::string_view item) {
+    static const std::vector<std::string> empty;
+    const auto found = shuffledItemDroppers.find(std::string(item));
+    return found == shuffledItemDroppers.end() ? empty : found->second;
 }
 
 bool EnemyDropShuffle::Apply(std::uint32_t seed, int version) {
@@ -165,6 +269,18 @@ bool EnemyDropShuffle::Apply(std::uint32_t seed, int version) {
     if (!result.coversVanillaDrops) {
         Logger::Log(LogLevel::File, "[DropShuffle] Coverage validation failed; table left unchanged");
         return false;
+    }
+
+    eligibleEnemies.clear();
+    shuffledItemDroppers.clear();
+    for (const auto& assignment : result.enemies) {
+        const std::string enemy(assignment.enemy);
+        eligibleEnemies.insert(enemy);
+        std::unordered_set<std::string_view> itemsForEnemy;
+        for (std::size_t slot = 0; slot < assignment.items.size(); ++slot) {
+            if (!assignment.active[slot] || !itemsForEnemy.insert(assignment.items[slot]).second) continue;
+            shuffledItemDroppers[std::string(assignment.items[slot])].push_back(enemy);
+        }
     }
 
     std::unordered_map<std::string, SDK::FPBDropRateMasterData*> primaryRows;
@@ -203,7 +319,17 @@ bool EnemyDropShuffle::Apply(std::uint32_t seed, int version) {
         if (row) CopyOrdinaryDrops(*primary->second, *row);
     }
 
+    if (!SynchronizeItemDroppers(*dropManager)) {
+        RestoreOriginalRows(dropManager->DropTable);
+        RestoreOriginalItemDroppers(*dropManager);
+        shuffledItemDroppers.clear();
+        Logger::Log(LogLevel::File,
+                    "[DropShuffle] Item dropper index synchronization failed; shuffle reverted");
+        return false;
+    }
+
     Logger::Log(LogLevel::File, "[DropShuffle] Applied seed:", seed, "version:", version,
                 "enemies:", result.enemies.size());
+    shuffleApplied = true;
     return true;
 }
