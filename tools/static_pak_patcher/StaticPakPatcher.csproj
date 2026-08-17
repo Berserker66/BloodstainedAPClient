@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UAssetApiDir Condition="'$(UAssetApiDir)' == ''">D:\Bloodstained\randomizer\True-Randomization\Tools\UAssetAPI</UAssetApiDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="UAssetAPI">
+      <HintPath>$(UAssetApiDir)\UAssetAPI.dll</HintPath>
+    </Reference>
+    <Reference Include="UAssetSnippet">
+      <HintPath>$(UAssetApiDir)\UAssetSnippet.dll</HintPath>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(UAssetApiDir)\Newtonsoft.Json.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -48,6 +48,7 @@ const std::string ENTITLEMENT_LEDGER_VERSION_VALUE = "EntitlementLedgerVersion";
 const std::string ENTITLEMENT_LEDGER_COUNT_VALUE = "EntitlementLedgerCount";
 const std::string CONNECTION_SAVE_PREFIX = "AP_LastConnection_";
 const std::string CLEARED_LOCATION_SAVE_PREFIX = "AP_ClearedLocation_";
+const std::string PENDING_CLEARED_LOCATION_SAVE_PREFIX = "AP_PendingClearedLocation_";
 const std::string ENEMY_DROP_SHUFFLE_SEED_VALUE = "AP_EnemyDropShuffleSeed";
 const std::string ENEMY_DROP_SHUFFLE_VERSION_VALUE = "AP_EnemyDropShuffleVersion";
 const std::string STATIC_PAK_SAVE_SCHEMA_VALUE = "AP_StaticPakSaveSchema";
@@ -176,10 +177,6 @@ void Archipelago::ConnectSlot() {
     }
 }
 
-bool Archipelago::IsShardShuffleEnabled() const {
-    return IsConnected() && slotData_.is_object() && slotData_.value("shuffle_shards", false);
-}
-
 std::unordered_map<std::string, std::uint32_t> Archipelago::GetTrackerInventory() const {
     std::unordered_map<std::string, std::uint32_t> inventory;
     if (!ap || !IsConnected()) return inventory;
@@ -245,9 +242,16 @@ static LocationResolution ResolveLocation(const std::string& locationId, const s
     return resolution;
 }
 
+std::optional<bool> Archipelago::IsCurrentWorldLocation(const std::string& locationId) const {
+    if (!worldLocationSnapshotReady_ || !ap || !locationId.starts_with("AP_")) return std::nullopt;
+    return ResolveLocation(locationId, ap->get_missing_locations(), ap->get_checked_locations()).exists;
+}
+
 void Archipelago::ResetLocalLocationCache() {
     clearedLocations_.clear();
     clearedLocationsLoaded_ = false;
+    pendingClearedLocations_.clear();
+    pendingClearedLocationsLoaded_ = false;
 }
 
 void Archipelago::LoadClearedLocations() {
@@ -285,6 +289,58 @@ void Archipelago::RecordClearedLocation(const std::string& locationId) {
     clearedLocations_.push_back(locationId);
     InGameTracker::Instance().ObserveLocationCleared(locationId);
     Logger::Log(LogLevel::File, "[AP] Journaled cleared location:", locationId, "index:", index);
+}
+
+void Archipelago::LoadPendingClearedLocations() {
+    if (pendingClearedLocationsLoaded_) return;
+
+    pendingClearedLocations_.clear();
+    pendingClearedLocationsLoaded_ = true;
+    const int32_t locationCount = LoadSavedValue(PENDING_CLEARED_LOCATION_SAVE_PREFIX + "Count").value_or(0);
+    if (locationCount < 0 || locationCount > MAX_CLEARED_LOCATIONS) {
+        Logger::Log(LogLevel::Error, "[AP] Invalid pending cleared-location count: ", locationCount);
+        return;
+    }
+
+    for (int32_t index = 0; index < locationCount; index++) {
+        auto location = LoadSavedString(PENDING_CLEARED_LOCATION_SAVE_PREFIX + std::to_string(index));
+        if (!location || !location->starts_with("AP_")) continue;
+        if (std::find(pendingClearedLocations_.begin(), pendingClearedLocations_.end(), *location) ==
+            pendingClearedLocations_.end()) {
+            pendingClearedLocations_.push_back(*location);
+        }
+    }
+}
+
+void Archipelago::RecordPendingClearedLocation(const std::string& locationId) {
+    LoadPendingClearedLocations();
+    if (std::find(pendingClearedLocations_.begin(), pendingClearedLocations_.end(), locationId) !=
+        pendingClearedLocations_.end()) {
+        return;
+    }
+    if (pendingClearedLocations_.size() >= static_cast<size_t>(MAX_CLEARED_LOCATIONS)) {
+        Logger::Log(LogLevel::Error, "[AP] Pending cleared-location save limit reached");
+        return;
+    }
+
+    const size_t index = pendingClearedLocations_.size();
+    SaveLocalString(PENDING_CLEARED_LOCATION_SAVE_PREFIX + std::to_string(index), locationId);
+    SaveLocalValue(PENDING_CLEARED_LOCATION_SAVE_PREFIX + "Count", static_cast<int32_t>(index + 1));
+    pendingClearedLocations_.push_back(locationId);
+    InGameTracker::Instance().ObserveLocationCleared(locationId);
+    Logger::Log(LogLevel::File, "[AP] Journaled pre-connect cleared location:", locationId, "index:", index);
+}
+
+void Archipelago::PromotePendingClearedLocations() {
+    if (!HasCurrentSaveSchema()) return;
+    LoadPendingClearedLocations();
+    if (pendingClearedLocations_.empty()) return;
+
+    const auto pending = pendingClearedLocations_;
+    for (const auto& locationId : pending) RecordClearedLocation(locationId);
+    SaveLocalValue(PENDING_CLEARED_LOCATION_SAVE_PREFIX + "Count", 0);
+    pendingClearedLocations_.clear();
+    Logger::Log(LogLevel::File, "[AP] Promoted pre-connect cleared locations:", pending.size());
 }
 
 size_t Archipelago::SendMissingClearedLocations() {
@@ -342,19 +398,24 @@ void Archipelago::ReconcileCompletedBossShardLocations() {
 
 LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationId) {
     if (!locationId.starts_with("AP_")) return LocationCheckResult::UnknownLocation;
+    const bool wasClearedLocally = WasLocationClearedLocally(locationId.substr(3));
     if (!HasCurrentSaveSchema()) {
-        Logger::Log(LogLevel::File, "[AP] Refusing location check before schema-1 save validation:", locationId);
+        RecordPendingClearedLocation(locationId);
         return LocationCheckResult::NotReady;
     }
     RecordClearedLocation(locationId);
-    if (!ap || !IsConnected()) return LocationCheckResult::NotReady;
+    if (!ap || !worldLocationSnapshotReady_) return LocationCheckResult::NotReady;
 
     const auto missingLocations = ap->get_missing_locations();
     const auto checkedLocations = ap->get_checked_locations();
     auto requestedLocation = ResolveLocation(locationId, missingLocations, checkedLocations);
-    SendMissingClearedLocations();
-
     if (!requestedLocation.exists) return LocationCheckResult::UnknownLocation;
+    if (!IsConnected()) {
+        return requestedLocation.missing.empty() || wasClearedLocally ? LocationCheckResult::AlreadyChecked
+                                                                      : LocationCheckResult::NotReady;
+    }
+
+    SendMissingClearedLocations();
     return requestedLocation.missing.empty() ? LocationCheckResult::AlreadyChecked : LocationCheckResult::Sent;
 }
 
@@ -524,6 +585,7 @@ bool Archipelago::ValidateSlotAndSave(const json& slotData) {
             lastError_ = "Unsupported Bloodstained AP save schema " + std::to_string(*saveSchema);
             return false;
         }
+        PromotePendingClearedLocations();
         return true;
     }
     if (HasLegacySaveState()) {
@@ -532,6 +594,7 @@ bool Archipelago::ValidateSlotAndSave(const json& slotData) {
     }
 
     SaveLocalValue(STATIC_PAK_SAVE_SCHEMA_VALUE, STATIC_PAK_SCHEMA);
+    PromotePendingClearedLocations();
     Logger::Log(LogLevel::File, "[AP] Initialized static-pak save schema:", STATIC_PAK_SCHEMA,
                 "difficulty:", expectedDifficulty);
     return true;
@@ -936,6 +999,8 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
                 normalizedUri.empty() ? APClient::DEFAULT_URI : normalizedUri);
     ResetLocalLocationCache();
     localSavePrefix_.clear();
+    slotData_ = json{};
+    worldLocationSnapshotReady_ = false;
     localProgressLoaded_ = false;
     receivedItemGrantPending_ = false;
     receivedItemRetryAt_ = {};
@@ -1057,6 +1122,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
             UpdateState(ArchipelagoConnectionState::InvalidSlotError);
             return;
         }
+        worldLocationSnapshotReady_ = true;
         UpdateState(ArchipelagoConnectionState::SlotConnected);
         SendMissingClearedLocations();
         ReconcileCompletedBossShardLocations();
@@ -1104,7 +1170,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
         Logger::Log(LogLevel::File, "[AP] Socket disconnected; automatic reconnect pending for:", slotName_);
         Logger::Log(LogLevel::Debug, "[AP]", "socket disconnected");
         AbortPassword();
-        HookManager::ResetShardDropPolicy();
+        HookManager::ApplyShardDropPolicy();
         ap_slot_connect_sent = false;
         UpdateState(ArchipelagoConnectionState::Disconnected);
     });
@@ -1112,7 +1178,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     ap->set_slot_disconnected_handler([this]() {
         Logger::Log(LogLevel::File, "[AP] Slot disconnected:", slotName_);
         Logger::Log(LogLevel::Debug, "[AP]", "Player: ", slotName_, "disconnected");
-        HookManager::ResetShardDropPolicy();
+        HookManager::ApplyShardDropPolicy();
         UpdateState(ArchipelagoConnectionState::Disconnected);
         ap_slot_connect_sent = false;
     });
@@ -1177,6 +1243,8 @@ void Archipelago::Disconnect() {
     localSavePrefix_.clear();
     localProgressLoaded_ = false;
     receivedProgressionInventoryReconciled_ = false;
+    slotData_ = json{};
+    worldLocationSnapshotReady_ = false;
     InGameTracker::Instance().ResetConnection();
 }
 

@@ -34,10 +34,8 @@
 #include "Archipelago.h"
 #include "GameManager.h"
 #include "Logger.h"
-#include "Resource.h"
 #include "Tracker.h"
-
-extern "C" IMAGE_DOS_HEADER __ImageBase;
+#include "Utils.h"
 
 namespace {
 
@@ -47,6 +45,12 @@ using bloodstained::tracker::generated::LocationType;
 
 constexpr std::string_view TRACKER_DISPLAY_MODE_SAVE_KEY = "AP_TrackerDisplayMode";
 constexpr std::string_view HIDDEN_CHEST_NATIVE_ID = "treasurebox_sip025_2";
+constexpr std::string_view CHEST_MARKER_TEXTURE =
+    "/Game/Archipelago/UI/AP_ChestMarker.AP_ChestMarker";
+constexpr std::string_view WALL_MARKER_TEXTURE =
+    "/Game/Archipelago/UI/AP_WallMarker.AP_WallMarker";
+constexpr std::string_view SHARD_MARKER_TEXTURE =
+    "/Game/Archipelago/UI/AP_ShardMarker.AP_ShardMarker";
 // Compile-time gate for all main-map/minimap diagnostics. Keep disabled in normal test and release builds.
 constexpr bool ENABLE_MAP_DIAGNOSTICS = false;
 constexpr bool ENABLE_MINIMAP_CAPTURE_DIAGNOSTICS = false;
@@ -173,6 +177,11 @@ void ReleaseRootedObject(void*& pointer, SDK::int32& objectIndex) {
             static_cast<SDK::int32>(object->Flags) &
             ~static_cast<SDK::int32>(SDK::EObjectFlags::MarkAsRootSet));
     }
+    pointer = nullptr;
+    objectIndex = -1;
+}
+
+void ForgetObject(void*& pointer, SDK::int32& objectIndex) {
     pointer = nullptr;
     objectIndex = -1;
 }
@@ -743,27 +752,18 @@ void SuppressFinishedTreasureMarkers(const MarkerArray& markers) {
     }
 }
 
-SDK::UTexture2D* CreateEmbeddedTexture(SDK::UObject* worldContext, int resourceId, std::string_view description) {
-    const auto module = reinterpret_cast<HMODULE>(&__ImageBase);
-    const HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
-    if (!resource) {
-        LOG_MAP_DIAGNOSTIC("[Tracker] Could not find embedded ", description, " texture");
+SDK::UTexture2D* LoadCookedMarkerTexture(std::string_view assetPath, std::string_view description) {
+    SDK::TSoftObjectPtr<SDK::UObject> reference{};
+    const SDK::FSoftObjectPath path =
+        SDK::UKismetSystemLibrary::MakeSoftObjectPath(FStringFromString(std::string(assetPath)));
+    reference.ObjectID.AssetPathName = path.AssetPathName;
+    reference.ObjectID.SubPathString = path.SubPathString;
+    auto* object = SDK::UKismetSystemLibrary::LoadAsset_Blocking(reference);
+    if (!object || !object->IsA(SDK::UTexture2D::StaticClass())) {
+        LOG_MAP_DIAGNOSTIC("[Tracker] Could not load cooked ", description, " texture: ", assetPath);
         return nullptr;
     }
-
-    const HGLOBAL loadedResource = LoadResource(module, resource);
-    const DWORD resourceSize = SizeofResource(module, resource);
-    auto* resourceBytes = static_cast<SDK::uint8*>(LockResource(loadedResource));
-    if (!loadedResource || !resourceBytes || resourceSize == 0) {
-        LOG_MAP_DIAGNOSTIC("[Tracker] Could not read embedded ", description, " texture");
-        return nullptr;
-    }
-
-    SDK::TArray<SDK::uint8> textureBytes(resourceBytes, static_cast<SDK::int32>(resourceSize),
-                                         static_cast<SDK::int32>(resourceSize));
-    auto* texture = SDK::UKismetRenderingLibrary::ImportBufferAsTexture2D(worldContext, textureBytes);
-    if (!texture) LOG_MAP_DIAGNOSTIC("[Tracker] Unreal could not import embedded ", description, " texture");
-    return texture;
+    return static_cast<SDK::UTexture2D*>(object);
 }
 
 void SetImageTexture(SDK::UImage* image, SDK::UTexture2D* texture) {
@@ -1401,7 +1401,7 @@ std::size_t RenderWallLocationMarkers(SDK::UMapManageBlueprint_C* map,
     auto* playerController = GameManager::Instance().PlayerController();
     auto* hud = playerController ? static_cast<SDK::APBInterfaceHUD*>(playerController->MyHUD) : nullptr;
     auto* mapComponent = hud ? hud->m_MapComponent : nullptr;
-    auto* wallMarkerTexture = CreateEmbeddedTexture(map, IDR_WALL_MARKER_PNG, "wall marker");
+    auto* wallMarkerTexture = LoadCookedMarkerTexture(WALL_MARKER_TEXTURE, "wall marker");
     if (!mapManager || !mapComponent) return 0;
 
     std::size_t wallMarkers = 0;
@@ -1476,7 +1476,7 @@ std::size_t RenderShardRoomMarkers(SDK::UMapManageBlueprint_C* map,
     auto* mapComponent = hud ? hud->m_MapComponent : nullptr;
     if (!mapManager || !mapComponent) return 0;
 
-    auto* texture = CreateEmbeddedTexture(map, IDR_SHARD_MARKER_PNG, "shard marker");
+    auto* texture = LoadCookedMarkerTexture(SHARD_MARKER_TEXTURE, "shard marker");
     std::array<std::optional<GhostMapGeometry>, 4> geometries;
     std::array<std::optional<SDK::FVector2D>, 4> markerSizes;
     std::size_t rendered = 0;
@@ -1566,7 +1566,7 @@ std::size_t RenderSyntheticTreasureMarkers(
     auto* mapComponent = hud ? hud->m_MapComponent : nullptr;
     if (!mapManager || !mapComponent) return 0;
 
-    auto* chestTexture = CreateEmbeddedTexture(map, IDR_CHEST_MARKER_PNG, "chest marker");
+    auto* chestTexture = LoadCookedMarkerTexture(CHEST_MARKER_TEXTURE, "chest marker");
     std::array<std::optional<GhostMapGeometry>, 4> geometries;
     std::array<std::optional<NativeMapAxes>, 4> axes;
     std::array<std::optional<SDK::FVector2D>, 4> markerSizes;
@@ -1923,13 +1923,13 @@ MiniMapRenderResult RenderMiniMapTracker(
     result.anchored = true;
 
     auto* chestTexture =
-        treasureIds.empty() ? nullptr : CreateEmbeddedTexture(miniMap, IDR_CHEST_MARKER_PNG, "chest marker");
+        treasureIds.empty() ? nullptr : LoadCookedMarkerTexture(CHEST_MARKER_TEXTURE, "chest marker");
     auto* wallTexture = wallMarkerIds.empty()
                             ? nullptr
-                            : CreateEmbeddedTexture(miniMap, IDR_WALL_MARKER_PNG, "wall marker");
+                            : LoadCookedMarkerTexture(WALL_MARKER_TEXTURE, "wall marker");
     auto* shardTexture = shardMarkerIds.empty()
                              ? nullptr
-                             : CreateEmbeddedTexture(miniMap, IDR_SHARD_MARKER_PNG, "shard marker");
+                             : LoadCookedMarkerTexture(SHARD_MARKER_TEXTURE, "shard marker");
     for (auto* marker : miniMap->TreasureIconList) {
         if (!marker || !marker->Image_30) continue;
         const std::string markerId = NormalizeTreasureId(marker->treasureID.ToString());
@@ -2653,7 +2653,7 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
     std::unordered_set<std::string> materializedTreasureIds;
     std::string markedTreasureIds;
     auto* chestMarkerTexture =
-        treasureIds.empty() ? nullptr : CreateEmbeddedTexture(map, IDR_CHEST_MARKER_PNG, "chest marker");
+        treasureIds.empty() ? nullptr : LoadCookedMarkerTexture(CHEST_MARKER_TEXTURE, "chest marker");
     for (auto* marker : map->TreasureMarkerList) {
         if (!marker || !marker->Image_30) continue;
         const std::string treasureId = NormalizeTreasureId(marker->treasureID.ToString());
@@ -2726,11 +2726,11 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
         activeMiniMapCanvas_ = currentCanvas;
         activeMiniMapCanvasIndex_ = currentCanvas ? currentCanvas->Index : -1;
         ReleaseRootedObject(miniMapChestBrush_, miniMapChestBrushIndex_);
-        ReleaseRootedObject(miniMapChestTexture_, miniMapChestTextureIndex_);
+        ForgetObject(miniMapChestTexture_, miniMapChestTextureIndex_);
         ReleaseRootedObject(miniMapWallBrush_, miniMapWallBrushIndex_);
-        ReleaseRootedObject(miniMapWallTexture_, miniMapWallTextureIndex_);
+        ForgetObject(miniMapWallTexture_, miniMapWallTextureIndex_);
         ReleaseRootedObject(miniMapShardBrush_, miniMapShardBrushIndex_);
-        ReleaseRootedObject(miniMapShardTexture_, miniMapShardTextureIndex_);
+        ForgetObject(miniMapShardTexture_, miniMapShardTextureIndex_);
         if (!preserveCalibration) {
             miniMapCanvasCalibrationValid_ = false;
             miniMapCanvasCalibrationX_ = 0.0f;
@@ -3051,24 +3051,23 @@ void InGameTracker::PaintMiniMap(void* miniMapWidget, void* rawParams) {
     const SDK::FVector2D miniMapSize = SDK::USlateBlueprintLibrary::GetLocalSize(miniMapGeometry);
     if (miniMapSize.X <= 0.0f || miniMapSize.Y <= 0.0f) return;
     auto resolveBrush = [&](void*& rawBrush, std::int32_t& objectIndex,
-                            void*& rawTexture, std::int32_t& textureIndex, int resourceId,
+                            void*& rawTexture, std::int32_t& textureIndex, std::string_view assetPath,
                             std::string_view description) -> SDK::USlateBrushAsset* {
         if (IsLiveBrush(static_cast<SDK::USlateBrushAsset*>(rawBrush), objectIndex,
                         static_cast<SDK::UObject*>(rawTexture), textureIndex)) {
             return static_cast<SDK::USlateBrushAsset*>(rawBrush);
         }
         ReleaseRootedObject(rawBrush, objectIndex);
-        ReleaseRootedObject(rawTexture, textureIndex);
-        auto* texture = CreateEmbeddedTexture(miniMap, resourceId, description);
+        ForgetObject(rawTexture, textureIndex);
+        auto* texture = LoadCookedMarkerTexture(assetPath, description);
         if (!texture) return nullptr;
         auto* brush = static_cast<SDK::USlateBrushAsset*>(
             SDK::UGameplayStatics::SpawnObject(SDK::USlateBrushAsset::StaticClass(), miniMap));
         if (!brush) return nullptr;
         brush->Brush = SDK::UWidgetBlueprintLibrary::MakeBrushFromTexture(texture, 64, 64);
-        // NativePaint receives only raw C++ handles. Root both halves so GC cannot recycle the texture while leaving
-        // the brush object apparently valid; ApplyMiniMap explicitly releases them with the paint surface.
+        // NativePaint receives only a raw brush handle, so retain that transient wrapper for the paint-surface
+        // lifetime. The cooked texture is package-owned and remains referenced by the rooted brush.
         brush->Flags |= SDK::EObjectFlags::MarkAsRootSet;
-        texture->Flags |= SDK::EObjectFlags::MarkAsRootSet;
         rawBrush = brush;
         objectIndex = brush->Index;
         rawTexture = texture;
@@ -3078,13 +3077,13 @@ void InGameTracker::PaintMiniMap(void* miniMapWidget, void* rawParams) {
 
     auto* chestBrush = resolveBrush(miniMapChestBrush_, miniMapChestBrushIndex_,
                                     miniMapChestTexture_, miniMapChestTextureIndex_,
-                                    IDR_CHEST_MARKER_PNG, "native-paint chest marker");
+                                    CHEST_MARKER_TEXTURE, "native-paint chest marker");
     auto* wallBrush = resolveBrush(miniMapWallBrush_, miniMapWallBrushIndex_,
                                    miniMapWallTexture_, miniMapWallTextureIndex_,
-                                   IDR_WALL_MARKER_PNG, "native-paint wall marker");
+                                   WALL_MARKER_TEXTURE, "native-paint wall marker");
     auto* shardBrush = resolveBrush(miniMapShardBrush_, miniMapShardBrushIndex_,
                                     miniMapShardTexture_, miniMapShardTextureIndex_,
-                                    IDR_SHARD_MARKER_PNG, "native-paint shard marker");
+                                    SHARD_MARKER_TEXTURE, "native-paint shard marker");
     SDK::USlateBrushAsset* ghostBrush = nullptr;
     if (IsLiveBrush(static_cast<SDK::USlateBrushAsset*>(MINI_MAP_GHOST_PAINT_BRUSH),
                     MINI_MAP_GHOST_PAINT_BRUSH_INDEX,

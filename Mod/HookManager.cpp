@@ -173,6 +173,18 @@ const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     {"AP_FamiliaArcher_Shard", "FamiliaArcher"},
 };
 
+// These PAK placeholders represent repeatable vanilla shard sources rather than AP checks. They must stay
+// suppressed when absent from the connected world's location set; restoring their vanilla IDs would hand out
+// progression outside Archipelago. Keep location membership authoritative so older worlds which did expose one
+// of these checks remain compatible.
+const std::unordered_set<std::string> suppressedNonLocationShardIds = {
+    "AP_FamiliaSilverKnight_Shard",
+};
+
+bool IsSuppressedNonLocationShard(const std::string& shardId) {
+    return suppressedNonLocationShardIds.contains(shardId);
+}
+
 std::optional<SDK::FName> ResolveVanillaShardId(const SDK::FName& randomizedShardId) {
     auto knownShard = knownVanillaShardIds.find(randomizedShardId.ToString());
     if (knownShard == knownVanillaShardIds.end()) return std::nullopt;
@@ -322,18 +334,21 @@ void HookManager::ResetShardDropPolicy() {
 }
 
 void HookManager::ApplyShardDropPolicy() {
-    auto* archipelago = Archipelago::ConnectedInstance();
+    auto* archipelago = &Archipelago::Instance();
     ResetShardDropPolicy();
-    if (!archipelago) return;
 
     auto* dropManager = SDK::UPBDropManager::GetDropManager();
 
-    const bool shuffleShards = archipelago->IsShardShuffleEnabled();
     const bool autoSellRepeatedShards = QualityOfLife::Instance().IsAutoSellWastedShardsEnabled();
     size_t unsuppressedDropRows = 0;
+    size_t shuffledDropRows = 0;
     for (const auto& [randomizedName, vanillaName] : knownVanillaShardIds) {
-        if ((!shuffleShards || autoSellRepeatedShards) && dropManager && dropManager->DropTable &&
-            randomizedName.starts_with("AP_")) {
+        const auto isShuffledLocation = archipelago->IsCurrentWorldLocation(randomizedName);
+        if (!isShuffledLocation) continue;
+        if (*isShuffledLocation) shuffledDropRows++;
+        const bool suppressNonLocation = !*isShuffledLocation && IsSuppressedNonLocationShard(randomizedName);
+        if ((!*isShuffledLocation || autoSellRepeatedShards) && !suppressNonLocation && dropManager &&
+            dropManager->DropTable) {
             std::string dropRowName = randomizedName.substr(3);
             auto* dropRow = FindDropMasterRow(dropManager->DropTable, dropRowName);
             if (dropRow) {
@@ -344,8 +359,9 @@ void HookManager::ApplyShardDropPolicy() {
         }
     }
 
-    Logger::Log(LogLevel::File, "[Shard] Applied current shard drop policy; shuffle:", shuffleShards,
-                "unsuppressed drop rows:", unsuppressedDropRows, "auto-sell repeats:", autoSellRepeatedShards);
+    Logger::Log(LogLevel::File, "[Shard] Applied current shard drop policy; shuffled location rows:",
+                shuffledDropRows, "unsuppressed drop rows:", unsuppressedDropRows,
+                "auto-sell repeats:", autoSellRepeatedShards);
 }
 
 bool HookManager::Init() {
@@ -394,6 +410,7 @@ bool HookManager::Init() {
         GameManager::Instance().PlayerAlive();
         InGameTracker::Instance().LoadDisplayMode();
         QualityOfLife::Instance().LoadSettings();
+        QualityOfLife::Instance().AcceptAvailableBountyHunts();
         InGameTracker::Instance().InvalidateReachability("save loaded");
         Archipelago::Instance().ResetLocalLocationCache();
         Archipelago::Instance().ApplySavedEnemyDropShuffle();
@@ -472,7 +489,11 @@ bool HookManager::PostInit() {
             if (params->Quantity <= 0 || !params->ReturnValue) return;
 
             const std::string nativeItemId = params->newItemId.ToString();
-            if (!nativeItemId.empty()) InGameTracker::Instance().ObserveNativeItem(nativeItemId);
+            if (nativeItemId.empty()) return;
+            InGameTracker::Instance().ObserveNativeItem(nativeItemId);
+            if (nativeItemId.starts_with("AP_")) {
+                Archipelago::Instance().SendLocationChecks(nativeItemId);
+            }
         });
 
     // Whens constantly when the player is alive
@@ -541,8 +562,7 @@ bool HookManager::PostInit() {
         auto shardId = shardBase->ShardId;
         std::string shardName = shardId.ToString();
         if (!shardName.starts_with("AP_")) return;
-        auto* archipelago = Archipelago::ConnectedInstance();
-        if (!archipelago) return;
+        auto* archipelago = &Archipelago::Instance();
 
         auto vanillaShardId = ResolveVanillaShardId(shardId);
         if (!vanillaShardId) {
@@ -550,15 +570,22 @@ bool HookManager::PostInit() {
             return;
         }
 
-        if (!archipelago->IsShardShuffleEnabled()) {
+        const auto isShuffledLocation = archipelago->IsCurrentWorldLocation(shardName);
+        if (!isShuffledLocation) return;
+        if (!*isShuffledLocation) {
+            if (IsSuppressedNonLocationShard(shardName)) {
+                Logger::Log(LogLevel::File, "[Shard] Suppressed non-location shard source:", shardName);
+                ((SDK::AActor*)(shardBase))->K2_DestroyActor();
+                return;
+            }
             RestoreVanillaShardAppearance(shardBase, *vanillaShardId);
             return;
         }
 
         LocationCheckResult checkResult = archipelago->SendLocationChecks(shardName);
         if (checkResult == LocationCheckResult::NotReady) {
-            Logger::Log("[Shard] World data is not ready; leaving vanilla shard actor intact:", shardName);
-            return;
+            Logger::Log(LogLevel::File,
+                        "[Shard] Journaled shuffled shard while disconnected and suppressed actor:", shardName);
         }
 
         if (checkResult == LocationCheckResult::UnknownLocation) {
@@ -599,6 +626,15 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
     QualityOfLife::Instance().ProcessEventBefore(obj, func, params);
     std::string functionName = func->Name.GetRawString();
 
+    // Location placeholders must remain in the vanilla inventory so the native pickup remains durable, but their
+    // internal AP_* names are implementation details and must never produce a player-facing item popup. The
+    // post-event callback journals the successful grant directly, so suppressing display cannot lose the check.
+    if (params && functionName == "GetItemWithDisplay" &&
+        obj->Class->Name.ToString() == "PBCharacterInventoryComponent") {
+        auto* itemParams = static_cast<SDK::Params::PBCharacterInventoryComponent_GetItemWithDisplay*>(params);
+        if (itemParams->newItemId.ToString().starts_with("AP_")) itemParams->isDisplay = false;
+    }
+
     if (functionName == "QuitGame" || functionName == "QuitGameYes") {
         shuttingDown = true;
         Archipelago::Instance().Shutdown();
@@ -609,13 +645,15 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
     if (functionName == "UserConstructionScript" && obj->Class->Name.ToString() == "PurpleShard_C") {
         auto* shardBase = static_cast<SDK::AShardBase*>(obj);
         std::string shardName = shardBase->ShardId.ToString();
-        auto* archipelago = Archipelago::ConnectedInstance();
-        if (!archipelago || !shardName.starts_with("AP_")) return;
+        auto* archipelago = &Archipelago::Instance();
+        if (!shardName.starts_with("AP_")) return;
 
         auto vanillaShardId = ResolveVanillaShardId(shardBase->ShardId);
         if (!vanillaShardId) return;
 
-        if (archipelago->IsShardShuffleEnabled()) return;
+        const auto isShuffledLocation = archipelago->IsCurrentWorldLocation(shardName);
+        if (!isShuffledLocation || *isShuffledLocation) return;
+        if (IsSuppressedNonLocationShard(shardName)) return;
 
         RestoreVanillaShardAppearance(shardBase, *vanillaShardId);
         return;
@@ -625,8 +663,8 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
 
     auto* crystallizeParams = static_cast<SDK::Params::PBBaseCharacter_CrystallizeDead*>(params);
     std::string shardName = crystallizeParams->DropShardId.ToString();
-    auto* archipelago = Archipelago::ConnectedInstance();
-    if (!archipelago || !shardName.starts_with("AP_")) return;
+    auto* archipelago = &Archipelago::Instance();
+    if (!shardName.starts_with("AP_")) return;
 
     auto vanillaShardId = ResolveVanillaShardId(crystallizeParams->DropShardId);
     if (!vanillaShardId) {
@@ -634,7 +672,9 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
         return;
     }
 
-    if (archipelago->IsShardShuffleEnabled()) return;
+    const auto isShuffledLocation = archipelago->IsCurrentWorldLocation(shardName);
+    if (!isShuffledLocation || *isShuffledLocation) return;
+    if (IsSuppressedNonLocationShard(shardName)) return;
 
     crystallizeParams->DropShardId = *vanillaShardId;
 }

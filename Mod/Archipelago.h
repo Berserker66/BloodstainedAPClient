@@ -66,7 +66,7 @@ class Archipelago {
     std::optional<ArchipelagoConnectionInfo> LoadSavedConnectionInfo() const;
 
     LocationCheckResult SendLocationChecks(const std::string& locationId);
-    bool IsShardShuffleEnabled() const;
+    std::optional<bool> IsCurrentWorldLocation(const std::string& locationId) const;
     bool IsMissingLocation(const std::string& locationName, std::uint64_t expectedId) const;
     bool WasLocationClearedLocally(const std::string& locationName);
     std::unordered_map<std::string, std::uint32_t> GetTrackerInventory() const;
@@ -81,6 +81,7 @@ class Archipelago {
     void AbortPassword();
     void ConnectSlot();
     void LoadClearedLocations();
+    void LoadPendingClearedLocations();
     bool LoadLocalProgress();
     void ProcessReceivedItems();
     void CompleteReceivedItem(int64_t itemIndex, int64_t itemId, const std::string& itemName,
@@ -93,6 +94,8 @@ class Archipelago {
     bool HasCurrentSaveSchema() const;
     bool HasLegacySaveState() const;
     void RecordClearedLocation(const std::string& locationId);
+    void RecordPendingClearedLocation(const std::string& locationId);
+    void PromotePendingClearedLocations();
     void SaveConnectionInfo() const;
     bool ApplyConnectedEnemyDropShuffle(const std::string& seedName, std::uint32_t slotId);
     void SaveLocalInt64(const std::string& name, int64_t value) const;
@@ -120,6 +123,8 @@ class Archipelago {
     bool receivedItemGrantPending_ = false;
     bool receivedProgressionInventoryReconciled_ = false;
     bool clearedLocationsLoaded_ = false;
+    bool pendingClearedLocationsLoaded_ = false;
+    bool worldLocationSnapshotReady_ = false;
     std::atomic_flag polling_ = ATOMIC_FLAG_INIT;
     std::chrono::steady_clock::time_point receivedItemRetryAt_{};
     uint64_t receivedItemGeneration_ = 0;
@@ -127,6 +132,7 @@ class Archipelago {
     std::map<int64_t, APClient::NetworkItem> receivedItems_;
     std::unordered_map<int64_t, std::uint32_t> awardedItemCounts_;
     std::vector<std::string> clearedLocations_;
+    std::vector<std::string> pendingClearedLocations_;
     json slotData_;
 
     int64_t shardDropInitialGrade_ = 1;

@@ -379,6 +379,32 @@ void TestScriptedAreaGates() {
           "derived tracker events cannot be injected as player inventory");
 }
 
+void TestBackerRoomDoorKeys() {
+    Tracker tracker;
+    std::unordered_map<std::string, std::uint32_t> complete_inventory;
+    for (const std::string_view item : bloodstained::tracker::generated::ITEMS) {
+        complete_inventory.emplace(item, 99u);
+    }
+
+    for (const auto& [key, room] : {
+             std::pair<std::string_view, std::string_view>{"Warhorse's Key", "m88BKR_001"},
+             {"Millionaire's Key", "m88BKR_002"},
+             {"Carpenter's Key", "m88BKR_004"},
+         }) {
+        auto inventory_without_key = complete_inventory;
+        inventory_without_key.erase(std::string(key));
+        tracker.SetInventory(inventory_without_key);
+        const auto without_key = tracker.GetReachableRooms(Difficulty::NORMAL);
+        Check(!std::ranges::any_of(without_key, [room](const auto* reachable) { return reachable->name == room; }),
+              "a locked backer room is unreachable without its door key");
+
+        tracker.SetInventory(complete_inventory);
+        const auto with_key = tracker.GetReachableRooms(Difficulty::NORMAL);
+        Check(std::ranges::any_of(with_key, [room](const auto* reachable) { return reachable->name == room; }),
+              "a locked backer room is reachable with its door key");
+    }
+}
+
 std::uint64_t HashDropShuffle(const bloodstained::enemy_drop_shuffle::ShuffleResult& result) {
     std::uint64_t hash = 1469598103934665603ull;
     for (const auto& enemy : result.enemies) {
@@ -436,6 +462,7 @@ int main() {
     TestGalleonOpeningHeightGate();
     TestShardRoomCoverage();
     TestScriptedAreaGates();
+    TestBackerRoomDoorKeys();
     TestEnemyDropShuffle();
     if (failures != 0) {
         std::cerr << failures << " tracker test(s) failed\n";

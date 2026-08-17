@@ -1,0 +1,24 @@
+{
+  "package_version": "1.1.0",
+  "static_pak_schema": 1,
+  "source": "True Randomizer 3.0.7 Archipelago asset output with native Archipelago map-marker, cooked marker-texture and map-registry, client-driven post-Den Gebel's Glasses unlock, and minimum-three O.D. lending patches, pinned and redistributed as a static artifact",
+  "sha256": "ca0c8120287cbb81681bbcfc506729dfda9337a6b33ea08da2f034bcbe87843e",
+  "file_count": 788,
+  "generated_assets_removed": [
+    "DifficultSelecter",
+    "EntryNameSetter",
+    "VersionNumber"
+  ],
+  "content_policy": "base-and-free-content-v1",
+  "included_free_content": [
+    "Base game Classic Mode assets",
+    "Shantae crossover update"
+  ],
+  "excluded_paid_content": [
+    "IGA's Back Pack",
+    "Succubus cosmetic pack",
+    "Magical Girl cosmetic pack",
+    "Japanese cosmetic pack",
+    "Classic II: Dominique's Curse"
+  ]
+}

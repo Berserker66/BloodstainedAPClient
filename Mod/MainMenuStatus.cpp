@@ -21,7 +21,7 @@ namespace {
 
 constexpr unsigned long long STATUS_REFRESH_INTERVAL_MS = 1000;
 constexpr std::string_view STATIC_PAK_SHA256 =
-    "ff01e4bcacb38920e7ac0f0f8d83aa5b65378a46f8c8751cd13c85c3cab993e9";
+    "ca0c8120287cbb81681bbcfc506729dfda9337a6b33ea08da2f034bcbe87843e";
 
 bool IsOwnedBy(const SDK::UObject* object, const SDK::UObject* owner) {
     for (const SDK::UObject* outer = object ? object->Outer : nullptr; outer; outer = outer->Outer) {

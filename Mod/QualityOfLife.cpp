@@ -3,6 +3,7 @@
 #include <ProjectBlood_classes.hpp>
 #include <ProjectBlood_parameters.hpp>
 
+#include <array>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -15,6 +16,28 @@
 namespace {
 
 constexpr const char* AUTO_SELL_WASTED_SHARDS_SAVE_KEY = "AP_QoL_AutoSellWastedShards";
+
+struct BountyMarkerReplacement {
+    const char* questId;
+    const char* enemyId;
+    const char* invalidRoom;
+    const char* validRoom;
+};
+
+// Audited against the cooked enemy actors in the base, Normal, and Hard room layers.
+constexpr std::array BOUNTY_MARKER_REPLACEMENTS = {
+    BountyMarkerReplacement{"Quest_Enemy01", "N3003", "m02VIL_002", "m03ENT_001"},
+    BountyMarkerReplacement{"Quest_Enemy05", "N3011", "m03ENT_01", "m03ENT_011"},
+    BountyMarkerReplacement{"Quest_Enemy08", "N3111", "m05SAN_021", "m03ENT_024"},
+    BountyMarkerReplacement{"Quest_Enemy11", "N3110", "m06KNG_015", "m06KNG_000"},
+    BountyMarkerReplacement{"Quest_Enemy14", "N2010", "m05SAN_001", "m12SND_001"},
+    BountyMarkerReplacement{"Quest_Enemy14", "N2010", "m05SAN_012", "m12SND_012"},
+    BountyMarkerReplacement{"Quest_Enemy14", "N2010", "m05SAN_013", "m12SND_013"},
+};
+
+constexpr const char* HARD_ONLY_MARKER_QUEST = "Quest_Enemy13";
+constexpr const char* HARD_ONLY_MARKER_ENEMY = "N3056";
+constexpr const char* HARD_ONLY_MARKER_ROOM = "m11UGD_018";
 
 struct PendingShardSale {
     SDK::FName shardId;
@@ -92,6 +115,76 @@ void QualityOfLife::SetAutoSellWastedShardsEnabled(bool enabled) {
     autoSellWastedShards_.store(enabled);
     SDK::UPBGameInstance::SetSavedValue(FNameFromString(AUTO_SELL_WASTED_SHARDS_SAVE_KEY), enabled ? 1 : 0);
     Logger::Log(LogLevel::File, "[QoL] Set auto-sell wasted shards:", enabled);
+}
+
+void QualityOfLife::AcceptAvailableBountyHunts() {
+    auto* questManager = SDK::UPBQuestManager::GetQuestManager();
+    auto* questTable = questManager ? questManager->GetQuestTable() : nullptr;
+    if (!questManager || !questTable) {
+        Logger::Log(LogLevel::File, "[QoL] Could not auto-accept bounty hunts because quest data is unavailable");
+        return;
+    }
+
+    SDK::int32 acceptedCount = 0;
+    for (const auto& row : questTable->RowMap) {
+        const SDK::FName questId = row.Key();
+        const std::string questName = questId.ToString();
+        if (!questName.starts_with("Quest_Enemy")) continue;
+
+        const auto* questData = reinterpret_cast<const SDK::FPBQuestMasterData*>(row.Value());
+        if (!questData || questData->QuestType != SDK::EQuestType::Enemy) continue;
+        if (questManager->IsAccepted(questId) || questManager->IsDone(questId)) continue;
+        if (!questManager->IsAcceptable(questId)) continue;
+
+        questManager->StartAccept(questId);
+        acceptedCount++;
+    }
+
+    Logger::Log(LogLevel::File, "[QoL] Auto-accepted available bounty hunts:", acceptedCount);
+
+    // Accepted quests persist their own copy of EnemyLocations. Repair every invalid
+    // shipped marker in place so this covers both old saves and quests accepted above.
+    SDK::int32 repairedMarkerCount = 0;
+    for (auto& accepted : questManager->Accepted) {
+        const std::string questId = accepted.QuestID.ToString();
+        const std::string enemyId = accepted.EnemyID01.ToString();
+
+        for (const auto& replacement : BOUNTY_MARKER_REPLACEMENTS) {
+            if (questId != replacement.questId || enemyId != replacement.enemyId) continue;
+
+            SDK::int32 invalidIndex = -1;
+            bool alreadyHasValidRoom = false;
+            for (SDK::int32 index = 0; index < accepted.EnemyLocations.Num(); ++index) {
+                const std::string room = accepted.EnemyLocations[index].ToString();
+                if (room == replacement.invalidRoom) invalidIndex = index;
+                if (room == replacement.validRoom) alreadyHasValidRoom = true;
+            }
+            if (invalidIndex < 0) continue;
+
+            if (alreadyHasValidRoom) {
+                accepted.EnemyLocations.Remove(invalidIndex);
+            } else {
+                accepted.EnemyLocations[invalidIndex] = FNameFromString(replacement.validRoom);
+            }
+            repairedMarkerCount++;
+        }
+
+        // This room contains Archdemons only in the Hard overlay. Keeping the marker
+        // produces a false scroll on Normal, so omit it rather than advertise a
+        // difficulty-dependent target.
+        if (questId == HARD_ONLY_MARKER_QUEST && enemyId == HARD_ONLY_MARKER_ENEMY) {
+            for (SDK::int32 index = accepted.EnemyLocations.Num() - 1; index >= 0; --index) {
+                if (accepted.EnemyLocations[index].ToString() != HARD_ONLY_MARKER_ROOM) continue;
+                accepted.EnemyLocations.Remove(index);
+                repairedMarkerCount++;
+            }
+        }
+    }
+
+    if (repairedMarkerCount > 0) {
+        Logger::Log(LogLevel::File, "[QoL] Repaired invalid bounty hunt map markers:",
+                    repairedMarkerCount);
+    }
 }
 
 void QualityOfLife::SellRepeatedShardNow(const SDK::FName& vanillaShardId) {

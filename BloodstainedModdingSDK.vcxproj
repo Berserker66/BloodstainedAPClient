@@ -235,7 +235,6 @@
     <ClInclude Include="Mod\EnemyDropShuffle.h" />
     <ClInclude Include="Mod\EnemyDropShuffleLogic.h" />
     <ClInclude Include="Mod\MainMenuStatus.h" />
-    <ClInclude Include="Mod\Resource.h" />
     <ClInclude Include="Mod\ModRunner.h" />
     <ClInclude Include="Mod\NotifyObject.h" />
     <ClInclude Include="Mod\QualityOfLife.h" />
@@ -251,12 +250,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="version\version.def" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="Assets\chest-marker.png" />
-    <Image Include="Assets\shard-marker.png" />
-    <Image Include="Assets\wall-marker.png" />
-    <ResourceCompile Include="BloodstainedAP.rc" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="Notes.txt" />

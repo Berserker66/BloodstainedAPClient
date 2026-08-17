@@ -14,6 +14,7 @@
 
 #include "CoreUObject_classes.hpp"
 #include "Engine_classes.hpp"
+#include "Archipelago.h"
 #include "Logger.h"
 #include "ThreadQueue.h"
 #include "TrackerData.generated.h"
@@ -55,16 +56,16 @@ PaidDlcItemPreparation PrepareOwnedIgaCatalogRow(const std::string& itemId) {
     return PaidDlcItemPreparation::NotReady;
 }
 
-void RemoveArchipelagoPlaceholderShards() {
+void RecoverArchipelagoPlaceholderShards() {
     auto* player = GameManager::Instance().Player();
     if (!player || !player->CharacterInventory) return;
     auto* inventory = player->CharacterInventory;
 
-    std::vector<std::pair<SDK::FName, int32_t>> placeholders;
+    std::vector<SDK::FName> placeholders;
     auto collect = [&placeholders](const SDK::TArray<SDK::FPBItemCatalogData>& items) {
         for (const auto& item : items) {
             if (item.ID.ToString().starts_with("AP_")) {
-                placeholders.emplace_back(item.ID, std::max(1, item.Num));
+                placeholders.push_back(item.ID);
             }
         }
     };
@@ -75,12 +76,14 @@ void RemoveArchipelagoPlaceholderShards() {
     collect(inventory->myFamiliarShards);
     collect(inventory->mySkills);
 
-    int removed = 0;
-    for (const auto& [itemId, quantity] : placeholders) {
-        if (inventory->RemoveItem(itemId, quantity, false)) removed++;
+    int recovered = 0;
+    for (const auto& itemId : placeholders) {
+        if (Archipelago::Instance().SendLocationChecks(itemId.ToString()) != LocationCheckResult::UnknownLocation) {
+            recovered++;
+        }
     }
-    if (removed > 0) {
-        Logger::Log(LogLevel::File, "[AP] Removed leaked location-placeholder shards from inventory:", removed);
+    if (recovered > 0) {
+        Logger::Log(LogLevel::File, "[AP] Recovered location checks from retained placeholder shards:", recovered);
     }
 }
 
@@ -194,7 +197,7 @@ bool GameManager::PostInit() {
     Logger::Log("Populated Display Table");
     Sleep(200);
     ThreadQueue::Instance().Enqueue([this] {
-        RemoveArchipelagoPlaceholderShards();
+        RecoverArchipelagoPlaceholderShards();
         GameManager::Instance().PopulateDisplayToItemIdTable();
     });
     // GameManager::Instance().PopulateDisplayToItemIdTable();
