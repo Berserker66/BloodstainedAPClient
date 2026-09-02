@@ -4,6 +4,8 @@
 #include <mutex>
 #include <string>
 
+enum class DeathLinkMode : int32_t;
+
 // Lightweight, UI-friendly bridge to request Archipelago actions without touching Archipelago internals
 // Usage: UI code calls EnqueueConnect/EnqueueDisconnect/EnqueueSync, then periodically call ProcessPending()
 // from the main/game loop (or wherever Archipelago is processed).
@@ -15,7 +17,7 @@ class APBridge {
 
     // Enqueue actions from UI
     void EnqueueConnect(const std::string& slotName, const std::string& password, const std::string& uri = "",
-                        const bool& wantsDeathlink = false);
+                        DeathLinkMode deathLinkMode = static_cast<DeathLinkMode>(0));
     void EnqueueDisconnect();
     void EnqueueSync();
 
@@ -33,7 +35,7 @@ class APBridge {
         std::string slotName;
         std::string password;
         std::string uri;
-        bool wantsDeathlink;
+        DeathLinkMode deathLinkMode;
     };
 
     std::deque<Command> queue_;

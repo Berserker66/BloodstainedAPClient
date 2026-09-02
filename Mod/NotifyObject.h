@@ -1,6 +1,7 @@
 #pragma once
-#include <chrono>
+#include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,13 +13,11 @@ class NotifyObject {
     using Callback = std::function<void(void* obj)>;
     using CallbackWithFunc = std::function<void(void* obj, const std::string& funcName)>;
     using CallBackWithFuncAndParams = std::function<void(void* obj, const std::string& funcName, void* params)>;
-    using IsValidFunc = std::function<bool(void* obj)>;
-
     NotifyObject() = default;
     ~NotifyObject() = default;
 
     int GetCallbackCount() const { return (int)callbacks.size() + (int)classCallbacks.size(); }
-    int GetProcessedCount() const { return processedCount; }
+    int GetProcessedCount() const { return processedCount.load(std::memory_order_relaxed); }
 
     void Register(const std::string& className, const std::string& funcName, Callback callback) {
         std::string key = className + "|" + funcName;
@@ -56,23 +55,18 @@ class NotifyObject {
         Logger::Log("[NotifyObject] Registered class=", className, " (with func names and params)");
     }
 
-    void SetValidityChecker(IsValidFunc checker) { isValidFunc = checker; }
-
     void OnProcessEvent(void* obj, const std::string& className, const std::string& funcName, void* params) {
         if (!obj) return;
-
-        CleanupIfNeeded();
 
         std::string key = className + "|" + funcName;
         auto it = callbacks.find(key);
         if (it != callbacks.end()) {
             // Logger::Log("[NotifyObject] MATCH class=", className, " func=", funcName);
-            if (trackedObjects.find(obj) == trackedObjects.end()) {
-                trackedObjects.insert(obj);
-                processedCount++;
+            ScopedTracking tracking(*this, obj);
+            if (tracking) {
+                processedCount.fetch_add(1, std::memory_order_relaxed);
                 // Logger::Log("[NotifyObject] Callback fired! (processed: ", processedCount, ")");
                 it->second(obj);
-                trackedObjects.erase(obj);
             }
             return;
         }
@@ -80,12 +74,11 @@ class NotifyObject {
         auto classIt = classCallbacks.find(className);
         if (classIt != classCallbacks.end()) {
             // Logger::Log("[NotifyObject] MATCH class=", className, " (class callback)");
-            if (trackedObjects.find(obj) == trackedObjects.end()) {
-                trackedObjects.insert(obj);
-                processedCount++;
+            ScopedTracking tracking(*this, obj);
+            if (tracking) {
+                processedCount.fetch_add(1, std::memory_order_relaxed);
                 // Logger::Log("[NotifyObject] Callback fired! (processed: ", processedCount, ")");
                 classIt->second(obj);
-                trackedObjects.erase(obj);
             }
         }
 
@@ -122,26 +115,34 @@ class NotifyObject {
         callbacks.clear();
         classCallbacks.clear();
         classCallbacksWithFunc.clear();
+        std::lock_guard lock(trackedObjectsMutex);
         trackedObjects.clear();
     }
 
    private:
-    void CleanupIfNeeded() {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration<double, std::milli>(now - lastCleanup).count();
-
-        if (elapsed < 500.0) return;
-
-        for (auto it = trackedObjects.begin(); it != trackedObjects.end();) {
-            if (!isValidFunc || !isValidFunc(*it)) {
-                Logger::Log("[NotifyObject] Removing invalid obj=", (void*)*it);
-                it = trackedObjects.erase(it);
-            } else {
-                ++it;
-            }
+    class ScopedTracking {
+       public:
+        ScopedTracking(NotifyObject& owner, void* object) : owner_(owner), object_(object) {
+            std::lock_guard lock(owner_.trackedObjectsMutex);
+            tracked_ = owner_.trackedObjects.insert(object_).second;
         }
-        lastCleanup = now;
-    }
+
+        ~ScopedTracking() {
+            if (!tracked_) return;
+            std::lock_guard lock(owner_.trackedObjectsMutex);
+            owner_.trackedObjects.erase(object_);
+        }
+
+        explicit operator bool() const { return tracked_; }
+
+        ScopedTracking(const ScopedTracking&) = delete;
+        ScopedTracking& operator=(const ScopedTracking&) = delete;
+
+       private:
+        NotifyObject& owner_;
+        void* object_;
+        bool tracked_ = false;
+    };
 
     std::unordered_map<std::string, Callback> callbacks;
     std::unordered_map<std::string, Callback> classCallbacks;
@@ -150,7 +151,6 @@ class NotifyObject {
     std::unordered_map<std::string, Callback> partialCallbacks;
     std::unordered_map<std::string, CallbackWithFunc> partialCallbacksWithFunc;
     std::unordered_set<void*> trackedObjects;
-    IsValidFunc isValidFunc;
-    std::chrono::steady_clock::time_point lastCleanup = std::chrono::steady_clock::now();
-    int processedCount = 0;
+    std::mutex trackedObjectsMutex;
+    std::atomic<int> processedCount{0};
 };

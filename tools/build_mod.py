@@ -8,6 +8,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -88,6 +89,49 @@ def install() -> str:
     return artifact_hash
 
 
+def run_msbuild(target: str, jobs: int) -> subprocess.CompletedProcess[str]:
+    command = [
+        str(MSBUILD),
+        str(PROJECT),
+        f"/t:{target}",
+        "/p:Configuration=Release",
+        "/p:Platform=x64",
+        "/p:PlatformToolset=v145",
+        f"/m:{jobs}",
+    ]
+    print(f"Running {target} with {jobs} compiler workers", flush=True)
+    return subprocess.run(
+        command,
+        cwd=REPOSITORY,
+        env=sanitized_environment(jobs),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def log_build_result(target: str, result: subprocess.CompletedProcess[str]) -> None:
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+    if result.returncode != 0:
+        print(f"{target} failed with exit code {result.returncode}.", file=sys.stderr, flush=True)
+
+
+def build(clean: bool, jobs: int) -> int:
+    target = "Rebuild" if clean else "Build"
+    result = run_msbuild(target, jobs)
+    log_build_result(target, result)
+    if result.returncode == 0 or clean:
+        return result.returncode
+
+    print("Incremental build failed; retrying with a clean rebuild.", file=sys.stderr, flush=True)
+    result = run_msbuild("Rebuild", jobs)
+    log_build_result("Rebuild", result)
+    return result.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -111,25 +155,9 @@ def main() -> int:
     if not GAME_DIRECTORY.is_dir():
         parser.error(f"game directory was not found at {GAME_DIRECTORY}")
 
-    target = "Rebuild" if args.clean else "Build"
-    command = [
-        str(MSBUILD),
-        str(PROJECT),
-        f"/t:{target}",
-        "/p:Configuration=Release",
-        "/p:Platform=x64",
-        "/p:PlatformToolset=v145",
-        f"/m:{args.jobs}",
-    ]
-    print(f"Running {target} with {args.jobs} compiler workers", flush=True)
-    result = subprocess.run(
-        command,
-        cwd=REPOSITORY,
-        env=sanitized_environment(args.jobs),
-        check=False,
-    )
-    if result.returncode != 0:
-        return result.returncode
+    build_result = build(args.clean, args.jobs)
+    if build_result != 0:
+        return build_result
 
     installed_hash = install()
     print(f"Installed: {INSTALLED_PLUGIN}")

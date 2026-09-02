@@ -32,6 +32,8 @@ class InGameTracker {
     void ApplyDeferredGhostMap(void* mapWidget);
     void ApplyMapMarkers(void* mapWidget);
     void ApplyMiniMap(void* miniMapWidget);
+    void AuditLocationClear(std::string_view locationName);
+    void AuditOpenedChestPosition(void* chestActor);
     void ReassertMiniMapCustomMarker(void* miniMapWidget);
     void ReactivateMiniMapForMenu();
     void PaintMiniMap(void* miniMapWidget, void* paintParams);

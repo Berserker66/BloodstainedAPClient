@@ -17,11 +17,17 @@ using json = nlohmann::json;
 
 enum class ItemGrantResult;
 
+enum class DeathLinkMode : int32_t {
+    Off = 0,
+    Waystone = 1,
+    GameOver = 2,
+};
+
 struct ArchipelagoConnectionInfo {
     std::string uri;
     std::string slotName;
     std::string password;
-    bool wantsDeathlink = false;
+    DeathLinkMode deathLinkMode = DeathLinkMode::Off;
 };
 
 enum class LocationCheckResult { NotReady, UnknownLocation, AlreadyChecked, Sent };
@@ -54,9 +60,12 @@ class Archipelago {
     void SetLastError(const std::string error) const { lastError_ = error; };
     bool IsPendingDeathlink() const { return pendingDeathlink_; };
     void ResetDeathLink() const { pendingDeathlink_ = false; };
+    DeathLinkMode GetDeathLinkMode() const { return deathLinkMode_; }
+    void SetDeathLinkMode(DeathLinkMode deathLinkMode);
 
     // AP Actions
-    bool Connect(const std::string& slotName, const std::string& password, std::string uri, const bool& wantsDeathlink);
+    bool Connect(const std::string& slotName, const std::string& password, std::string uri,
+                 DeathLinkMode deathLinkMode);
     void Disconnect();
     void Shutdown();
     void Poll();
@@ -90,6 +99,7 @@ class Archipelago {
     void PersistAwardedItemCounts() const;
     void ReconcileReceivedProgressionInventory();
     void ReconcileCompletedBossShardLocations();
+    bool ValidateRequiredDlcLocations();
     bool ValidateSlotAndSave(const json& slotData);
     bool HasCurrentSaveSchema() const;
     bool HasLegacySaveState() const;
@@ -117,7 +127,7 @@ class Archipelago {
 
     mutable std::string lastError_;
     mutable bool pendingDeathlink_ = false;
-    mutable bool wantsDeathlink_ = false;
+    mutable DeathLinkMode deathLinkMode_ = DeathLinkMode::Off;
     bool localProgressLoaded_ = false;
     bool processingReceivedItems_ = false;
     bool receivedItemGrantPending_ = false;

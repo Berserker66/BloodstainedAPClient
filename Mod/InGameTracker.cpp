@@ -54,6 +54,11 @@ constexpr std::string_view SHARD_MARKER_TEXTURE =
 // Compile-time gate for all main-map/minimap diagnostics. Keep disabled in normal test and release builds.
 constexpr bool ENABLE_MAP_DIAGNOSTICS = false;
 constexpr bool ENABLE_MINIMAP_CAPTURE_DIAGNOSTICS = false;
+constexpr float ROOM_WORLD_WIDTH = 1260.0f;
+constexpr float ROOM_WORLD_HEIGHT = 720.0f;
+// This runs only when a chest is opened. A quarter-room threshold is comfortably above authored placement jitter
+// while retaining the large transform errors that matter for tracker corrections.
+constexpr float CHEST_POSITION_DIVERGENCE_THRESHOLD_ROOMS = 0.25f;
 #define LOG_MAP_DIAGNOSTIC(...)                         \
     do {                                                \
         if constexpr (ENABLE_MAP_DIAGNOSTICS) {         \
@@ -86,6 +91,25 @@ Difficulty GetDifficulty() {
         default:
             return Difficulty::NORMAL;
     }
+}
+
+bool NativeLocationNamesMatch(std::string_view observed, std::string_view candidate) {
+    return observed == candidate ||
+           (candidate.size() > observed.size() && candidate.starts_with(observed) &&
+            candidate[observed.size()] == '.') ||
+           (observed.size() > candidate.size() && observed.starts_with(candidate) &&
+            observed[candidate.size()] == '.');
+}
+
+std::unordered_map<std::string, std::uint32_t> BuildCurrentTrackerInventory(Archipelago& archipelago) {
+    auto inventory = archipelago.GetTrackerInventory();
+    for (const auto& nativeItem : bloodstained::tracker::generated::TRAVERSAL_NATIVE_ITEMS) {
+        if (GameManager::Instance().CheckAllInventories(std::string(nativeItem.native_id))) {
+            inventory[std::string(nativeItem.item_name)] =
+                std::max(inventory[std::string(nativeItem.item_name)], 1u);
+        }
+    }
+    return inventory;
 }
 
 std::string NormalizeTreasureId(std::string treasureId) {
@@ -170,8 +194,38 @@ TrackedWidgetHandle TrackWidget(SDK::UWidget* widget) {
     return widget ? TrackedWidgetHandle{widget, widget->Index} : TrackedWidgetHandle{};
 }
 
+struct DeferredRootRelease {
+    void* pointer = nullptr;
+    SDK::int32 objectIndex = -1;
+    std::chrono::steady_clock::time_point releaseAfter{};
+};
+
+std::vector<DeferredRootRelease> DEFERRED_ROOT_RELEASES;
+std::unordered_set<void*> OWNED_SLATE_ROOTS;
+constexpr auto SLATE_RESOURCE_RELEASE_GRACE = std::chrono::seconds(5);
+
+void CancelDeferredRootRelease(void* pointer) {
+    DEFERRED_ROOT_RELEASES.erase(
+        std::remove_if(DEFERRED_ROOT_RELEASES.begin(), DEFERRED_ROOT_RELEASES.end(),
+                       [pointer](const DeferredRootRelease& release) { return release.pointer == pointer; }),
+        DEFERRED_ROOT_RELEASES.end());
+}
+
+void RootObjectForSlate(void* pointer, SDK::int32 objectIndex) {
+    if (!pointer || objectIndex < 0 || SDK::UObject::GObjects->GetByIndex(objectIndex) != pointer) return;
+    // Package-backed marker textures can be reused by the next paint surface. Reactivation transfers the existing
+    // root back to the active owner and cancels the old surface's scheduled release.
+    CancelDeferredRootRelease(pointer);
+    auto* object = static_cast<SDK::UObject*>(pointer);
+    const auto flags = static_cast<SDK::int32>(object->Flags);
+    if ((flags & static_cast<SDK::int32>(SDK::EObjectFlags::MarkAsRootSet)) != 0) return;
+    object->Flags |= SDK::EObjectFlags::MarkAsRootSet;
+    OWNED_SLATE_ROOTS.insert(pointer);
+}
+
 void ReleaseRootedObject(void*& pointer, SDK::int32& objectIndex) {
-    if (pointer && objectIndex >= 0 && SDK::UObject::GObjects->GetByIndex(objectIndex) == pointer) {
+    if (pointer && OWNED_SLATE_ROOTS.erase(pointer) != 0 && objectIndex >= 0 &&
+        SDK::UObject::GObjects->GetByIndex(objectIndex) == pointer) {
         auto* object = static_cast<SDK::UObject*>(pointer);
         object->Flags = static_cast<SDK::EObjectFlags>(
             static_cast<SDK::int32>(object->Flags) &
@@ -181,9 +235,28 @@ void ReleaseRootedObject(void*& pointer, SDK::int32& objectIndex) {
     objectIndex = -1;
 }
 
-void ForgetObject(void*& pointer, SDK::int32& objectIndex) {
+void RetireRootedObject(void*& pointer, SDK::int32& objectIndex) {
+    if (pointer && objectIndex >= 0 && SDK::UObject::GObjects->GetByIndex(objectIndex) == pointer) {
+        RootObjectForSlate(pointer, objectIndex);
+        if (OWNED_SLATE_ROOTS.contains(pointer)) {
+            DEFERRED_ROOT_RELEASES.push_back(
+                {pointer, objectIndex, std::chrono::steady_clock::now() + SLATE_RESOURCE_RELEASE_GRACE});
+        }
+    }
     pointer = nullptr;
     objectIndex = -1;
+}
+
+void ReleaseExpiredRootedObjects() {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = DEFERRED_ROOT_RELEASES.begin(); it != DEFERRED_ROOT_RELEASES.end();) {
+        if (now < it->releaseAfter) {
+            ++it;
+            continue;
+        }
+        ReleaseRootedObject(it->pointer, it->objectIndex);
+        it = DEFERRED_ROOT_RELEASES.erase(it);
+    }
 }
 
 bool IsLiveObject(const SDK::UObject* object, SDK::int32 expectedIndex) {
@@ -249,6 +322,16 @@ SDK::FVector2D BORROWED_CUSTOM_MINIMAP_POSITION{};
 SDK::FVector2D BORROWED_CUSTOM_MINIMAP_SIZE{};
 SDK::FSlateBrush BORROWED_CUSTOM_MINIMAP_BRUSH{};
 bool BORROWED_CUSTOM_MINIMAP_ACTIVE = false;
+struct PersistentMiniMapAtlasBuffer {
+    SDK::USlateBrushAsset* brush = nullptr;
+    SDK::int32 brushIndex = -1;
+    SDK::UTextureRenderTarget2D* texture = nullptr;
+    SDK::int32 textureIndex = -1;
+};
+
+constexpr SDK::int32 MINI_MAP_ATLAS_TEXTURE_SIZE = 1024;
+std::array<PersistentMiniMapAtlasBuffer, 2> MINI_MAP_ATLAS_BUFFERS;
+SDK::int32 MINI_MAP_ACTIVE_ATLAS_BUFFER = -1;
 void* MINI_MAP_GHOST_PAINT_BRUSH = nullptr;
 SDK::int32 MINI_MAP_GHOST_PAINT_BRUSH_INDEX = -1;
 void* MINI_MAP_GHOST_TEXTURE = nullptr;
@@ -868,17 +951,70 @@ std::vector<SDK::uint8> EncodeUncompressedRgbaPng(const std::vector<SDK::uint8>&
     return png;
 }
 
-struct ReachabilityAtlasTexture {
-    SDK::UTextureRenderTarget2D* renderTarget = nullptr;
-    SDK::UTexture2D* stagingTexture = nullptr;
-};
+bool IsLiveAtlasBuffer(const PersistentMiniMapAtlasBuffer& buffer) {
+    return IsLiveBrush(buffer.brush, buffer.brushIndex, buffer.texture, buffer.textureIndex) &&
+           buffer.texture->IsA(SDK::UTextureRenderTarget2D::StaticClass());
+}
 
-ReachabilityAtlasTexture CreateReachabilityAtlasTexture(
+bool EnsureAtlasBuffer(SDK::UObject* worldContext, SDK::UTexture2D* brushTemplate,
+                       PersistentMiniMapAtlasBuffer& buffer) {
+    if (IsLiveAtlasBuffer(buffer)) return true;
+    auto* renderTarget = SDK::UKismetRenderingLibrary::CreateRenderTarget2D(
+        worldContext, MINI_MAP_ATLAS_TEXTURE_SIZE, MINI_MAP_ATLAS_TEXTURE_SIZE,
+        SDK::ETextureRenderTargetFormat::RTF_RGBA8);
+    if (!renderTarget) return false;
+    auto* brush = static_cast<SDK::USlateBrushAsset*>(
+        SDK::UGameplayStatics::SpawnObject(SDK::USlateBrushAsset::StaticClass(), worldContext));
+    if (!brush) return false;
+    brush->Brush = SDK::UWidgetBlueprintLibrary::MakeBrushFromTexture(
+        brushTemplate, MINI_MAP_ATLAS_TEXTURE_SIZE, MINI_MAP_ATLAS_TEXTURE_SIZE);
+    brush->Brush.ResourceObject = renderTarget;
+    brush->Brush.bHasUObject = 1;
+    RootObjectForSlate(brush, brush->Index);
+    RootObjectForSlate(renderTarget, renderTarget->Index);
+    buffer = {brush, brush->Index, renderTarget, renderTarget->Index};
+    return true;
+}
+
+void ActivateAtlasBuffer(SDK::int32 bufferIndex) {
+    auto& buffer = MINI_MAP_ATLAS_BUFFERS[bufferIndex];
+    MINI_MAP_ACTIVE_ATLAS_BUFFER = bufferIndex;
+    MINI_MAP_GHOST_PAINT_BRUSH = buffer.brush;
+    MINI_MAP_GHOST_PAINT_BRUSH_INDEX = buffer.brushIndex;
+    MINI_MAP_GHOST_TEXTURE = buffer.texture;
+    MINI_MAP_GHOST_TEXTURE_INDEX = buffer.textureIndex;
+    MINI_MAP_GHOST_TEXTURE_WIDTH = MINI_MAP_ATLAS_TEXTURE_SIZE;
+    MINI_MAP_GHOST_TEXTURE_HEIGHT = MINI_MAP_ATLAS_TEXTURE_SIZE;
+}
+
+bool DrawTextureToAtlasBuffer(SDK::UObject* worldContext, SDK::UTexture* source,
+                              PersistentMiniMapAtlasBuffer& buffer) {
+    if (!worldContext || !source || !IsLiveAtlasBuffer(buffer)) return false;
+    SDK::UKismetRenderingLibrary::ClearRenderTarget2D(
+        worldContext, buffer.texture, {0.0f, 0.0f, 0.0f, 0.0f});
+    SDK::UCanvas* canvas = nullptr;
+    SDK::FVector2D canvasSize{};
+    SDK::FDrawToRenderTargetContext context{};
+    SDK::UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(
+        worldContext, buffer.texture, &canvas, &canvasSize, &context);
+    if (canvas) {
+        canvas->K2_DrawTexture(source, {0.0f, 0.0f},
+                               {static_cast<float>(MINI_MAP_ATLAS_TEXTURE_SIZE),
+                                static_cast<float>(MINI_MAP_ATLAS_TEXTURE_SIZE)},
+                               {0.0f, 0.0f}, {1.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f},
+                               SDK::EBlendMode::BLEND_Opaque, 0.0f, {0.0f, 0.0f});
+    }
+    SDK::UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(worldContext, context);
+    return canvas != nullptr;
+}
+
+bool CreateReachabilityAtlasTexture(
     SDK::UObject* worldContext,
     SDK::int32 width,
     SDK::int32 height,
     const std::vector<MiniMapAtlasCell>& cells) {
-    if (!worldContext || width <= 0 || height <= 0) return {};
+    if (!worldContext || width != MINI_MAP_ATLAS_TEXTURE_SIZE ||
+        height != MINI_MAP_ATLAS_TEXTURE_SIZE) return false;
     std::vector<SDK::uint8> pixels(static_cast<std::size_t>(width) * height * 4, 0);
     // Keep biome hues faint because the minimap is composited over the live game world.
     constexpr SDK::uint8 MINI_MAP_GHOST_ALPHA = 52;
@@ -900,25 +1036,17 @@ ReachabilityAtlasTexture CreateReachabilityAtlasTexture(
     SDK::TArray<SDK::uint8> textureBytes(png.data(), static_cast<SDK::int32>(png.size()),
                                          static_cast<SDK::int32>(png.size()));
     auto* stagingTexture = SDK::UKismetRenderingLibrary::ImportBufferAsTexture2D(worldContext, textureBytes);
-    if (!stagingTexture) return {};
-    auto* renderTarget = SDK::UKismetRenderingLibrary::CreateRenderTarget2D(
-        worldContext, width, height, SDK::ETextureRenderTargetFormat::RTF_RGBA8);
-    if (!renderTarget) return {nullptr, stagingTexture};
-    SDK::UKismetRenderingLibrary::ClearRenderTarget2D(
-        worldContext, renderTarget, {0.0f, 0.0f, 0.0f, 0.0f});
-    SDK::UCanvas* canvas = nullptr;
-    SDK::FVector2D canvasSize{};
-    SDK::FDrawToRenderTargetContext context{};
-    SDK::UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(
-        worldContext, renderTarget, &canvas, &canvasSize, &context);
-    if (canvas) {
-        canvas->K2_DrawTexture(stagingTexture, {0.0f, 0.0f},
-                               {static_cast<float>(width), static_cast<float>(height)},
-                               {0.0f, 0.0f}, {1.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f},
-                               SDK::EBlendMode::BLEND_Opaque, 0.0f, {0.0f, 0.0f});
+    if (!stagingTexture) return false;
+    // Allocate exactly two process-persistent targets. Every full atlas rebuild draws into the inactive target and
+    // switches the paint brush only after EndDrawCanvasToRenderTarget has queued the completed update.
+    for (auto& buffer : MINI_MAP_ATLAS_BUFFERS) {
+        if (!EnsureAtlasBuffer(worldContext, stagingTexture, buffer)) return false;
     }
-    SDK::UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(worldContext, context);
-    return {renderTarget, stagingTexture};
+    const SDK::int32 inactiveBuffer = MINI_MAP_ACTIVE_ATLAS_BUFFER == 0 ? 1 : 0;
+    if (!DrawTextureToAtlasBuffer(worldContext, stagingTexture,
+                                  MINI_MAP_ATLAS_BUFFERS[inactiveBuffer])) return false;
+    ActivateAtlasBuffer(inactiveBuffer);
+    return true;
 }
 
 std::size_t UpdateReachabilityAtlasCells(
@@ -937,7 +1065,7 @@ std::size_t UpdateReachabilityAtlasCells(
     }
     auto* resource = static_cast<SDK::UObject*>(MINI_MAP_GHOST_TEXTURE);
     if (!resource->IsA(SDK::UTextureRenderTarget2D::StaticClass())) return 0;
-    auto* renderTarget = static_cast<SDK::UTextureRenderTarget2D*>(resource);
+    auto* activeRenderTarget = static_cast<SDK::UTextureRenderTarget2D*>(resource);
 
     // PBMapManager owns the authoritative 200x100 traversal grid. Following its current grid coordinate avoids
     // re-deriving the active cell from player/widget coordinates, whose vertical strides deliberately differ.
@@ -969,11 +1097,16 @@ std::size_t UpdateReachabilityAtlasCells(
     }
     if (changes.empty()) return 0;
 
+    const SDK::int32 inactiveBuffer = MINI_MAP_ACTIVE_ATLAS_BUFFER == 0 ? 1 : 0;
+    auto& targetBuffer = MINI_MAP_ATLAS_BUFFERS[inactiveBuffer];
+    if (!IsLiveAtlasBuffer(targetBuffer) ||
+        !DrawTextureToAtlasBuffer(miniMap, activeRenderTarget, targetBuffer)) return 0;
+
     SDK::UCanvas* canvas = nullptr;
     SDK::FVector2D canvasSize{};
     SDK::FDrawToRenderTargetContext context{};
     SDK::UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(
-        miniMap, renderTarget, &canvas, &canvasSize, &context);
+        miniMap, targetBuffer.texture, &canvas, &canvasSize, &context);
     if (!canvas || !canvas->DefaultTexture) {
         SDK::UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(miniMap, context);
         return 0;
@@ -1005,6 +1138,7 @@ std::size_t UpdateReachabilityAtlasCells(
         }
     }
     SDK::UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(miniMap, context);
+    ActivateAtlasBuffer(inactiveBuffer);
     if constexpr (ENABLE_MAP_DIAGNOSTICS && ENABLE_MINIMAP_CAPTURE_DIAGNOSTICS) {
         MINI_MAP_GHOST_PNG_BYTES = EncodeUncompressedRgbaPng(
             MINI_MAP_GHOST_PIXELS, static_cast<std::uint32_t>(MINI_MAP_GHOST_TEXTURE_WIDTH),
@@ -1119,6 +1253,28 @@ struct NativeMapAxes {
 };
 
 constexpr float WALL_MARKER_Z_OFFSET = 0.25f;
+constexpr std::string_view MOVING_TRAIN_ROOM = "m09TRN_002";
+std::atomic<bool> MOVING_TRAIN_TIMED_SEQUENCE_LAST_ACTIVE{false};
+
+bool IsMovingTrainTimedSequenceActive() {
+    auto* roomManager = GameManager::Instance().RoomManager();
+    const std::string currentRoom = roomManager ? roomManager->GetCurrentRoomId().ToString() : "";
+    if (!currentRoom.starts_with("m09TRN_")) return false;
+
+    auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
+    return gameInstance && gameInstance->IsUpdatingTimer(SDK::EPBEventTimerType::Default);
+}
+
+bool ShouldSuppressMovingTrainLocation(
+    const bloodstained::tracker::generated::LocationData& location,
+    bool timedSequenceActive) {
+    return timedSequenceActive && location.room == MOVING_TRAIN_ROOM;
+}
+
+float GetLocationMarkerMapX(const bloodstained::tracker::generated::LocationData& location,
+                            std::uint32_t roomWidth) {
+    return std::clamp(location.map_x, 0.0f, static_cast<float>(roomWidth));
+}
 
 float GetLocationMarkerMapZ(const bloodstained::tracker::generated::LocationData& location,
                             std::uint32_t roomHeight) {
@@ -1152,7 +1308,7 @@ bool IsLocationInsideMiniMapWindow(
     if (!IsRoomInsideMiniMapWindow(room, traverseX, traverseY)) return false;
     if (!location.has_map_position) return true;
 
-    const float mapX = std::clamp(location.map_x, 0.0f, static_cast<float>(room->width));
+    const float mapX = GetLocationMarkerMapX(location, room->width);
     const float mapZ = GetLocationMarkerMapZ(location, room->height);
     const SDK::int32 cellX = std::min(static_cast<SDK::int32>(mapX),
                                       static_cast<SDK::int32>(room->width) - 1);
@@ -1247,7 +1403,7 @@ std::optional<SDK::FVector2D> GetStaticLocationMapPosition(
     const auto* room = Tracker::FindRoom(location.room);
     if (!room || room->out_of_map || room->width == 0 || room->height == 0) return std::nullopt;
 
-    const float mapX = std::clamp(location.map_x, 0.0f, static_cast<float>(room->width));
+    const float mapX = GetLocationMarkerMapX(location, room->width);
     const float mapZ = std::clamp(location.map_z, 0.0f, static_cast<float>(room->height));
     const std::uint32_t cellX = std::min(static_cast<std::uint32_t>(mapX), room->width - 1u);
     const std::uint32_t cellZ = std::min(static_cast<std::uint32_t>(mapZ), room->height - 1u);
@@ -1432,7 +1588,7 @@ std::size_t RenderWallLocationMarkers(SDK::UMapManageBlueprint_C* map,
                 FindNativeRoomMarkerSize(map, mapComponent, mapType, *wallGeometry[mapIndex]);
         }
 
-        const float mapX = std::clamp(location.map_x, 0.0f, static_cast<float>(room->width));
+        const float mapX = GetLocationMarkerMapX(location, room->width);
         const float mapZ = GetLocationMarkerMapZ(location, room->height);
         const std::uint32_t cellX = std::min(static_cast<std::uint32_t>(mapX), room->width - 1u);
         const std::uint32_t cellZ = std::min(static_cast<std::uint32_t>(mapZ), room->height - 1u);
@@ -2301,71 +2457,49 @@ MiniMapRenderResult RenderMiniMapTracker(
             maximum.Y = std::max(maximum.Y, cell.center.Y + halfCell.Y);
         }
         const SDK::FVector2D atlasSize = maximum - minimum;
-        constexpr float MAX_ATLAS_TEXTURE_DIMENSION = 1024.0f;
-        const float textureScale = std::min(
-            1.0f, MAX_ATLAS_TEXTURE_DIMENSION / std::max(atlasSize.X, atlasSize.Y));
         const SDK::int32 columnCount = std::max<SDK::int32>(
             1, static_cast<SDK::int32>(std::lround(atlasSize.X / renderCellSize.X)));
         const SDK::int32 rowCount = std::max<SDK::int32>(
             1, static_cast<SDK::int32>(std::lround(atlasSize.Y / renderCellSize.Y)));
-        const SDK::int32 pixelPitchX = std::max<SDK::int32>(
-            1, static_cast<SDK::int32>(std::lround(renderCellSize.X * textureScale)));
-        const SDK::int32 pixelPitchY = std::max<SDK::int32>(
-            1, static_cast<SDK::int32>(std::lround(renderCellSize.Y * textureScale)));
-        const SDK::int32 textureWidth = columnCount * pixelPitchX;
-        const SDK::int32 textureHeight = rowCount * pixelPitchY;
+        const SDK::int32 textureWidth = MINI_MAP_ATLAS_TEXTURE_SIZE;
+        const SDK::int32 textureHeight = MINI_MAP_ATLAS_TEXTURE_SIZE;
         const SDK::FVector2D firstCenter = minimum + renderCellSize * 0.5f;
         for (auto& cell : atlasCells) {
             const SDK::int32 column = static_cast<SDK::int32>(
                 std::lround((cell.center.X - firstCenter.X) / renderCellSize.X));
             const SDK::int32 row = static_cast<SDK::int32>(
                 std::lround((cell.center.Y - firstCenter.Y) / renderCellSize.Y));
-            cell.left = std::clamp(column * pixelPitchX, 0, textureWidth);
-            cell.top = std::clamp(row * pixelPitchY, 0, textureHeight);
-            cell.right = std::clamp(cell.left + std::max<SDK::int32>(1, pixelPitchX - 1), 0, textureWidth);
-            cell.bottom = std::clamp(cell.top + std::max<SDK::int32>(1, pixelPitchY - 1), 0, textureHeight);
+            cell.left = std::clamp(
+                static_cast<SDK::int32>(std::lround(
+                    static_cast<double>(column) * textureWidth / columnCount)), 0, textureWidth);
+            cell.top = std::clamp(
+                static_cast<SDK::int32>(std::lround(
+                    static_cast<double>(row) * textureHeight / rowCount)), 0, textureHeight);
+            cell.right = std::clamp(
+                static_cast<SDK::int32>(std::lround(
+                    static_cast<double>(column + 1) * textureWidth / columnCount)) - 1,
+                cell.left + 1, textureWidth);
+            cell.bottom = std::clamp(
+                static_cast<SDK::int32>(std::lround(
+                    static_cast<double>(row + 1) * textureHeight / rowCount)) - 1,
+                cell.top + 1, textureHeight);
         }
-        const ReachabilityAtlasTexture atlas = CreateReachabilityAtlasTexture(
-            miniMap, textureWidth, textureHeight, atlasCells);
-        auto* atlasTexture = atlas.renderTarget
-                                 ? static_cast<SDK::UObject*>(atlas.renderTarget)
-                                 : static_cast<SDK::UObject*>(atlas.stagingTexture);
-        if (atlasTexture && atlas.stagingTexture) {
-            auto* atlasBrush = static_cast<SDK::USlateBrushAsset*>(
-                SDK::UGameplayStatics::SpawnObject(SDK::USlateBrushAsset::StaticClass(), miniMap));
-            if (atlasBrush) {
-                atlasBrush->Brush = SDK::UWidgetBlueprintLibrary::MakeBrushFromTexture(
-                    atlas.stagingTexture, textureWidth, textureHeight);
-                atlasBrush->Brush.ResourceObject = atlasTexture;
-                atlasBrush->Brush.bHasUObject = 1;
-                // FPaintContext takes a brush asset rather than a value brush. Neither SpawnObject's Outer nor a
-                // collapsed UImage is a GC reference to that transient asset, so it was repeatedly collected between
-                // Tick and NativePaint. Root both resources for exactly the lifetime of this atlas; cleanup removes
-                // the root flags before dropping the handles.
-                atlasBrush->Flags |= SDK::EObjectFlags::MarkAsRootSet;
-                atlasTexture->Flags |= SDK::EObjectFlags::MarkAsRootSet;
-                MINI_MAP_GHOST_PAINT_BRUSH = atlasBrush;
-                MINI_MAP_GHOST_PAINT_BRUSH_INDEX = atlasBrush->Index;
-                MINI_MAP_GHOST_TEXTURE = atlasTexture;
-                MINI_MAP_GHOST_TEXTURE_INDEX = atlasTexture->Index;
-                MINI_MAP_GHOST_TEXTURE_WIDTH = textureWidth;
-                MINI_MAP_GHOST_TEXTURE_HEIGHT = textureHeight;
-                MINI_MAP_GHOST_RENDER_MINIMUM = minimum;
-                MINI_MAP_GHOST_RENDER_MAXIMUM = maximum;
-                MINI_MAP_ATLAS_CELLS = std::move(atlasCells);
-                MINI_MAP_ATLAS_MAP_TYPE = static_cast<SDK::int32>(areaMapType);
-                result.ghostCells = static_cast<std::size_t>(std::count_if(
-                    MINI_MAP_ATLAS_CELLS.begin(), MINI_MAP_ATLAS_CELLS.end(),
-                    [](const MiniMapAtlasCell& cell) { return cell.painted; }));
-                LOG_MAP_DIAGNOSTIC(LogLevel::File, "[Tracker] Prepared native-paint minimap reachability atlas:",
-                            result.ghostCells, "reachable unexplored cells of",
-                            MINI_MAP_ATLAS_CELLS.size(), "valid cells into", textureWidth, "x", textureHeight,
-                            "texture; render bounds:", minimum.X, minimum.Y, maximum.X, maximum.Y,
-                            "render cell size:", renderCellSize.X, renderCellSize.Y,
-                            "integer texture pitch:", pixelPitchX, pixelPitchY,
-                            "vertical center stride/scale:", nativeVerticalStride,
-                            atlasVerticalCenterScale);
-            }
+        if (CreateReachabilityAtlasTexture(miniMap, textureWidth, textureHeight, atlasCells)) {
+            MINI_MAP_GHOST_RENDER_MINIMUM = minimum;
+            MINI_MAP_GHOST_RENDER_MAXIMUM = maximum;
+            MINI_MAP_ATLAS_CELLS = std::move(atlasCells);
+            MINI_MAP_ATLAS_MAP_TYPE = static_cast<SDK::int32>(areaMapType);
+            result.ghostCells = static_cast<std::size_t>(std::count_if(
+                MINI_MAP_ATLAS_CELLS.begin(), MINI_MAP_ATLAS_CELLS.end(),
+                [](const MiniMapAtlasCell& cell) { return cell.painted; }));
+            LOG_MAP_DIAGNOSTIC(LogLevel::File, "[Tracker] Prepared double-buffered minimap reachability atlas:",
+                        result.ghostCells, "reachable unexplored cells of",
+                        MINI_MAP_ATLAS_CELLS.size(), "valid cells into", textureWidth, "x", textureHeight,
+                        "texture; render bounds:", minimum.X, minimum.Y, maximum.X, maximum.Y,
+                        "render cell size:", renderCellSize.X, renderCellSize.Y,
+                        "texture grid:", columnCount, rowCount,
+                        "vertical center stride/scale:", nativeVerticalStride,
+                        atlasVerticalCenterScale);
         }
     }
 
@@ -2401,6 +2535,76 @@ void InGameTracker::ObserveLocationCleared(std::string_view locationName) {
     mainMapDirty_ = true;
     miniMapDirty_ = true;
     ReconcileFinishedTreasureMarkers(Archipelago::ConnectedInstance());
+}
+
+void InGameTracker::AuditLocationClear(std::string_view locationName) {
+    if (displayMode_.load() == TrackerDisplayMode::NONE || !inventorySynchronized_) return;
+    auto* archipelago = Archipelago::ConnectedInstance();
+    if (!archipelago) return;
+
+    std::string_view nativeName = locationName;
+    if (nativeName.starts_with("AP_")) nativeName.remove_prefix(3);
+
+    std::unordered_set<std::uint64_t> matchingIds;
+    std::string matchingNames;
+    for (const auto& binding : bloodstained::tracker::generated::LOCATION_BINDINGS) {
+        if (!NativeLocationNamesMatch(nativeName, binding.native_name)) continue;
+        matchingIds.insert(binding.id);
+        if (!matchingNames.empty()) matchingNames += ", ";
+        matchingNames += binding.native_name;
+    }
+    if (matchingIds.empty()) return;
+
+    Tracker tracker;
+    const auto inventory = BuildCurrentTrackerInventory(*archipelago);
+    tracker.SetInventory(inventory);
+    for (const auto* reachable : tracker.GetReachableLocations(GetDifficulty())) {
+        if (matchingIds.contains(reachable->id)) return;
+    }
+
+    std::string traversalItems;
+    for (const auto& [item, count] : inventory) {
+        if (count == 0 || !Tracker::IsTraversalItem(item)) continue;
+        if (!traversalItems.empty()) traversalItems += ", ";
+        traversalItems += item + "=" + std::to_string(count);
+    }
+    if (traversalItems.empty()) traversalItems = "none";
+    Logger::Log(LogLevel::File, "[TrackerLogic] Cleared location considered out of logic:",
+                std::string(locationName), "bindings:", matchingNames, "difficulty:",
+                static_cast<std::uint32_t>(GetDifficulty()), "traversal inventory:", traversalItems);
+}
+
+void InGameTracker::AuditOpenedChestPosition(void* chestActor) {
+    if (!chestActor || displayMode_.load() == TrackerDisplayMode::NONE) return;
+
+    auto* chest = static_cast<SDK::APBBronzeTreasureBox_BP_C*>(chestActor);
+    std::string nativeId = chest->DropItemID.ToString();
+    if (!nativeId.starts_with("AP_")) return;
+    nativeId.erase(0, 3);
+
+    const std::string normalizedId = NormalizeTreasureId(nativeId);
+    const auto* marker = FindChestLocationByNativeId(normalizedId);
+    if (!marker || !marker->has_map_position) return;
+
+    const SDK::FVector world = chest->K2_GetActorLocation();
+    auto* root = chest->K2_GetRootComponent();
+    const SDK::FVector relative = root ? root->RelativeLocation : world;
+    const float actorMapX = relative.X / ROOM_WORLD_WIDTH;
+    const float actorMapZ = relative.Z / ROOM_WORLD_HEIGHT;
+    const float deltaRoomsX = std::abs(actorMapX - marker->map_x);
+    const float deltaRoomsZ = std::abs(actorMapZ - marker->map_z);
+    if (deltaRoomsX <= CHEST_POSITION_DIVERGENCE_THRESHOLD_ROOMS &&
+        deltaRoomsZ <= CHEST_POSITION_DIVERGENCE_THRESHOLD_ROOMS) {
+        return;
+    }
+
+    Logger::Log(LogLevel::File, "[TrackerPosition] Opened chest differs from authored map position:",
+                marker->name, "native ID:", nativeId, "room:", marker->room,
+                "actor:", chest->GetFullName(), "world XYZ:", world.X, world.Y, world.Z,
+                "root-relative XYZ:", relative.X, relative.Y, relative.Z,
+                "actor map XZ:", actorMapX, actorMapZ,
+                "authored map XZ:", marker->map_x, marker->map_z,
+                "delta rooms XZ:", deltaRoomsX, deltaRoomsZ);
 }
 
 void InGameTracker::ResetConnection() {
@@ -2507,21 +2711,8 @@ void InGameTracker::ClearMiniMapMarkers(bool clearGhosts) {
             if (auto* widget = ResolveWidget(ghostWidget)) widget->RemoveFromParent();
         }
         spawnedMiniMapGhostWidgets_.clear();
-        if (MINI_MAP_GHOST_PAINT_BRUSH && MINI_MAP_GHOST_PAINT_BRUSH_INDEX >= 0 &&
-            SDK::UObject::GObjects->GetByIndex(MINI_MAP_GHOST_PAINT_BRUSH_INDEX) ==
-                MINI_MAP_GHOST_PAINT_BRUSH) {
-            auto* brushObject = static_cast<SDK::UObject*>(MINI_MAP_GHOST_PAINT_BRUSH);
-            brushObject->Flags = static_cast<SDK::EObjectFlags>(
-                static_cast<SDK::int32>(brushObject->Flags) &
-                ~static_cast<SDK::int32>(SDK::EObjectFlags::MarkAsRootSet));
-        }
-        if (MINI_MAP_GHOST_TEXTURE && MINI_MAP_GHOST_TEXTURE_INDEX >= 0 &&
-            SDK::UObject::GObjects->GetByIndex(MINI_MAP_GHOST_TEXTURE_INDEX) == MINI_MAP_GHOST_TEXTURE) {
-            auto* textureObject = static_cast<SDK::UObject*>(MINI_MAP_GHOST_TEXTURE);
-            textureObject->Flags = static_cast<SDK::EObjectFlags>(
-                static_cast<SDK::int32>(textureObject->Flags) &
-                ~static_cast<SDK::int32>(SDK::EObjectFlags::MarkAsRootSet));
-        }
+        // The two atlas buffers are process-persistent. Clearing a save/widget view only detaches the active aliases;
+        // a later rebuild repaints the inactive buffer and swaps without ever invalidating a Slate resource.
         MINI_MAP_GHOST_PAINT_BRUSH = nullptr;
         MINI_MAP_GHOST_PAINT_BRUSH_INDEX = -1;
         MINI_MAP_GHOST_TEXTURE = nullptr;
@@ -2548,6 +2739,7 @@ void InGameTracker::ClearMiniMapMarkers(bool clearGhosts) {
         panel->SetVisibility(BORROWED_CUSTOM_MINIMAP_PANEL_VISIBILITY);
     }
     BORROWED_CUSTOM_MINIMAP_PANEL = {};
+    BORROWED_CUSTOM_MINIMAP_BRUSH = {};
     BORROWED_CUSTOM_MINIMAP_ACTIVE = false;
 }
 
@@ -2624,11 +2816,13 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
     }
     const auto reachableLocations =
         tracker.GetReachableMissingLocations(difficulty, archipelago->GetMissingLocationIds());
+    const bool movingTrainTimedSequenceActive = IsMovingTrainTimedSequenceActive();
 
     std::unordered_set<std::string> treasureIds;
     std::string reachableTreasureLocations;
     std::unordered_set<std::string> markedRooms;
     for (const auto* location : reachableLocations) {
+        if (ShouldSuppressMovingTrainLocation(*location, movingTrainTimedSequenceActive)) continue;
         const auto nativeLocationName = Tracker::FindNativeLocationName(location->id);
         if (!nativeLocationName ||
             archipelago->WasLocationClearedLocally(std::string(*nativeLocationName)) ||
@@ -2657,6 +2851,13 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
     for (auto* marker : map->TreasureMarkerList) {
         if (!marker || !marker->Image_30) continue;
         const std::string treasureId = NormalizeTreasureId(marker->treasureID.ToString());
+        const auto* markerLocation = FindLocationByNativeId(treasureId);
+        if (markerLocation &&
+            ShouldSuppressMovingTrainLocation(*markerLocation, movingTrainTimedSequenceActive)) {
+            SetCollapsed(marker);
+            SetCollapsed(marker->Image_30);
+            continue;
+        }
         if (!treasureIds.contains(treasureId)) continue;
         // Use one renderer for every chest with an extracted physical position. Mixing native treasure widgets with
         // synthetic capacity-pickup markers produces irreconcilable differences in scale, anchoring and lifecycle.
@@ -2710,7 +2911,20 @@ void InGameTracker::ApplyMapMarkers(void* mapWidget) {
 }
 
 void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
+    ReleaseExpiredRootedObjects();
     auto* miniMap = static_cast<SDK::UMiniMapBlueprint_C*>(miniMapWidget);
+    const bool movingTrainTimedSequenceActive = IsMovingTrainTimedSequenceActive();
+    const bool previousMovingTrainTimedSequenceActive =
+        MOVING_TRAIN_TIMED_SEQUENCE_LAST_ACTIVE.exchange(
+            movingTrainTimedSequenceActive, std::memory_order_relaxed);
+    if (movingTrainTimedSequenceActive != previousMovingTrainTimedSequenceActive) {
+        miniMapDirty_ = true;
+        mainMapDirty_ = true;
+        Logger::Log(LogLevel::File,
+                    movingTrainTimedSequenceActive
+                        ? "[Tracker] Suppressing moving-train markers during timed sequence"
+                        : "[Tracker] Restoring moving-train markers after timed sequence");
+    }
     auto* currentCanvas = miniMap ? miniMap->TotalMapBlueprint : nullptr;
     // Menu transitions can reconstruct/synchronize these Blueprint widgets without changing their UObject pointers,
     // which clears the script-paint dispatch bit. Reassert it every native Tick so custom paint resumes on return.
@@ -2719,18 +2933,15 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
     const bool samePaintSurface = activeMiniMap_ == miniMap && activeMiniMapCanvas_ == currentCanvas;
     const bool preserveCalibration = miniMapPaintRefreshRequested_ && samePaintSurface;
     if (!samePaintSurface || miniMapPaintRefreshRequested_) {
-        ClearMiniMapMarkers(!preserveCalibration);
-        if (!preserveCalibration) miniMapGhostsDirty_ = true;
+        // Widget reconstruction no longer owns the atlas lifetime. Preserve the active persistent buffer across room
+        // and menu transitions; an actual EDivideMap change below invalidates and redraws it into the other buffer.
+        ClearMiniMapMarkers(false);
         activeMiniMap_ = miniMap;
         activeMiniMapIndex_ = miniMap ? miniMap->Index : -1;
         activeMiniMapCanvas_ = currentCanvas;
         activeMiniMapCanvasIndex_ = currentCanvas ? currentCanvas->Index : -1;
-        ReleaseRootedObject(miniMapChestBrush_, miniMapChestBrushIndex_);
-        ForgetObject(miniMapChestTexture_, miniMapChestTextureIndex_);
-        ReleaseRootedObject(miniMapWallBrush_, miniMapWallBrushIndex_);
-        ForgetObject(miniMapWallTexture_, miniMapWallTextureIndex_);
-        ReleaseRootedObject(miniMapShardBrush_, miniMapShardBrushIndex_);
-        ForgetObject(miniMapShardTexture_, miniMapShardTextureIndex_);
+        // Marker textures and their tiny brush wrappers are reused across minimap widget reconstruction. They remain
+        // rooted for the process just like the atlas pair, avoiding another asynchronous Slate lifetime boundary.
         if (!preserveCalibration) {
             miniMapCanvasCalibrationValid_ = false;
             miniMapCanvasCalibrationX_ = 0.0f;
@@ -2744,7 +2955,6 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
             miniMapCalibrationStableFrames_ = 0;
         }
         miniMapPaintRefreshRequested_ = false;
-        if (!preserveCalibration) activeMiniMapType_ = -1;
         miniMapDirty_ = true;
         if constexpr (ENABLE_MAP_DIAGNOSTICS) {
             if (miniMap) {
@@ -2840,6 +3050,7 @@ void InGameTracker::ApplyMiniMap(void* miniMapWidget) {
         std::unordered_set<std::string> reachableShardRooms;
         for (const auto* location :
              tracker.GetReachableMissingLocations(difficulty, archipelago->GetMissingLocationIds())) {
+            if (ShouldSuppressMovingTrainLocation(*location, movingTrainTimedSequenceActive)) continue;
             const auto nativeLocationName = Tracker::FindNativeLocationName(location->id);
             if (!nativeLocationName ||
                 archipelago->WasLocationClearedLocally(std::string(*nativeLocationName)) ||
@@ -3057,8 +3268,8 @@ void InGameTracker::PaintMiniMap(void* miniMapWidget, void* rawParams) {
                         static_cast<SDK::UObject*>(rawTexture), textureIndex)) {
             return static_cast<SDK::USlateBrushAsset*>(rawBrush);
         }
-        ReleaseRootedObject(rawBrush, objectIndex);
-        ForgetObject(rawTexture, textureIndex);
+        RetireRootedObject(rawBrush, objectIndex);
+        RetireRootedObject(rawTexture, textureIndex);
         auto* texture = LoadCookedMarkerTexture(assetPath, description);
         if (!texture) return nullptr;
         auto* brush = static_cast<SDK::USlateBrushAsset*>(
@@ -3066,8 +3277,10 @@ void InGameTracker::PaintMiniMap(void* miniMapWidget, void* rawParams) {
         if (!brush) return nullptr;
         brush->Brush = SDK::UWidgetBlueprintLibrary::MakeBrushFromTexture(texture, 64, 64);
         // NativePaint receives only a raw brush handle, so retain that transient wrapper for the paint-surface
-        // lifetime. The cooked texture is package-owned and remains referenced by the rooted brush.
-        brush->Flags |= SDK::EObjectFlags::MarkAsRootSet;
+        // lifetime. Root the resource as well: Slate can retain a value copy of the brush beyond the UObject
+        // wrapper's active frame during room and menu reconstruction.
+        RootObjectForSlate(brush, brush->Index);
+        RootObjectForSlate(texture, texture->Index);
         rawBrush = brush;
         objectIndex = brush->Index;
         rawTexture = texture;
@@ -3428,7 +3641,7 @@ void InGameTracker::PaintMiniMap(void* miniMapWidget, void* rawParams) {
                                     float markerScale) {
         const auto* room = Tracker::FindRoom(location.room);
         if (!room) return std::optional<std::pair<SDK::FVector2D, SDK::FVector2D>>{};
-        return roomPositionToAtlasPaint(location.room, location.map_x,
+        return roomPositionToAtlasPaint(location.room, GetLocationMarkerMapX(location, room->width),
                                         GetLocationMarkerMapZ(location, room->height), markerScale);
     };
     auto roomCenterToAtlasPaint = [&](std::string_view roomName, float markerScale)

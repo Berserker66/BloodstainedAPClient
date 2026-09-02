@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "ClientVersion.h"
+#include "ConnectionUri.h"
 #include "EnemyDropShuffle.h"
 #include "EnemyDropShuffleLogic.h"
 #include "GameManager.h"
@@ -24,6 +25,7 @@
 #include "InGameTracker.h"
 #include "Logger.h"
 #include "MainMenuStatus.h"
+#include "ProgressiveItems.h"
 #include "ThreadQueue.h"
 #include "TrackerData.generated.h"
 #include "Utils.h"
@@ -52,9 +54,11 @@ const std::string PENDING_CLEARED_LOCATION_SAVE_PREFIX = "AP_PendingClearedLocat
 const std::string ENEMY_DROP_SHUFFLE_SEED_VALUE = "AP_EnemyDropShuffleSeed";
 const std::string ENEMY_DROP_SHUFFLE_VERSION_VALUE = "AP_EnemyDropShuffleVersion";
 const std::string STATIC_PAK_SAVE_SCHEMA_VALUE = "AP_StaticPakSaveSchema";
-const std::string CONTENT_POLICY = "base-and-free-content-v1";
+const std::string LEGACY_CONTENT_POLICY = "base-and-free-content-v1";
+const std::string CONTENT_POLICY = "base-free-and-optional-paid-dlc-v2";
 const int32_t STATIC_PAK_SCHEMA = 1;
-const int32_t CONNECTION_SAVE_VERSION = 2;
+const int32_t CONNECTION_SAVE_VERSION = 3;
+const int32_t LEGACY_BOOLEAN_DEATHLINK_CONNECTION_SAVE_VERSION = 2;
 const int32_t ENTITLEMENT_LEDGER_VERSION = 1;
 const int32_t MAX_ITEM_LEDGER_ENTRIES = 4096;
 const int32_t LEGACY_SAVE_SLOT_SCAN_LIMIT = 100;
@@ -66,9 +70,20 @@ const std::chrono::milliseconds ITEM_GRANT_RETRY_DELAY(500);
 // These enemies award their shard exactly once, as part of their boss defeat sequence. If the client was not able
 // to observe that short-lived shard actor, the save's completed-boss flag is the authoritative durable evidence
 // that the corresponding location was cleared.
-constexpr std::array<std::string_view, 13> BOSS_SHARD_ENEMY_IDS = {
-    "N1001", "N1002", "N1003", "N1004", "N1005", "N1006", "N1008",
-    "N2001", "N2004", "N2006", "N2007", "N2012", "N2013",
+struct BossShardLocation {
+    std::string_view boss_id;
+    std::string_view location_id;
+};
+
+constexpr std::array BOSS_SHARD_LOCATIONS = {
+    BossShardLocation{"N1001", "N1001_Shard"}, BossShardLocation{"N1002", "N1002_Shard"},
+    BossShardLocation{"N1003", "N1003_Shard"}, BossShardLocation{"N1004", "N1004_Shard"},
+    BossShardLocation{"N1005", "N1005_Shard"}, BossShardLocation{"N1006", "N1006_Shard"},
+    BossShardLocation{"N1008", "N1008_Shard"}, BossShardLocation{"N2001", "N2001_Shard"},
+    BossShardLocation{"N2004", "N2004_Shard"}, BossShardLocation{"N2006", "N2006_Shard"},
+    BossShardLocation{"N2007", "N2007_Shard"}, BossShardLocation{"N2012", "N2012_Shard"},
+    BossShardLocation{"N2013", "N2013_Shard"}, BossShardLocation{"N2016", "FamiliaArcher_Shard"},
+    BossShardLocation{"N2017", "N2017_Shard"},
 };
 
 #define UUID_FILE "uuid"
@@ -99,6 +114,7 @@ static std::optional<int64_t> LoadInt64(const std::string& name) {
 }
 
 static bool IsShardOrSkillItem(const std::string& itemId) {
+    if (GameManager::Instance().IsPaidDlcShard(itemId)) return true;
     return GameManager::Instance().ItemHasItemCategories(
         itemId, {SDK::ECarriedCatalog::AllShard, SDK::ECarriedCatalog::TriggerShard,
                  SDK::ECarriedCatalog::DirectionalShard, SDK::ECarriedCatalog::EffectiveShard,
@@ -112,6 +128,11 @@ static std::optional<std::string_view> GetNativeItemName(int64_t itemId) {
                                           [](const auto& entry, std::uint64_t id) { return entry.id < id; });
     if (binding == bindings.end() || binding->id != static_cast<std::uint64_t>(itemId)) return std::nullopt;
     return binding->native_name;
+}
+
+static bool IsKnownItemId(int64_t itemId) {
+    return GetNativeItemName(itemId).has_value() ||
+           bloodstained::items::FindProgressiveItem(static_cast<std::uint64_t>(itemId)) != nullptr;
 }
 
 static std::optional<int64_t> GetItemId(std::string_view nativeName) {
@@ -133,7 +154,9 @@ static std::optional<int64_t> GetLocationId(std::string_view nativeName) {
 static std::string GetDisplayItemName(int64_t itemId) {
     if (ap && ap->is_data_package_valid()) return ap->get_item_name(itemId, ap->get_game());
     const auto nativeName = GetNativeItemName(itemId);
-    return nativeName ? std::string(*nativeName) : "Unknown item " + std::to_string(itemId);
+    if (nativeName) return std::string(*nativeName);
+    const auto* progressive = bloodstained::items::FindProgressiveItem(static_cast<std::uint64_t>(itemId));
+    return progressive ? std::string(progressive->display_name) : "Unknown item " + std::to_string(itemId);
 }
 
 Archipelago& Archipelago::Instance() {
@@ -159,7 +182,7 @@ void Archipelago::ConnectSlot() {
     if (ap) {
         if (state_ == ArchipelagoConnectionState::Connected) {
             std::list<std::string> tags;
-            if (wantsDeathlink_) {
+            if (deathLinkMode_ != DeathLinkMode::Off) {
                 tags.push_back("DeathLink");
             }
             _connected = ap->ConnectSlot(slotName_, password_, itemsHandling_, tags, CLIENT_VERSION);
@@ -181,7 +204,15 @@ std::unordered_map<std::string, std::uint32_t> Archipelago::GetTrackerInventory(
     std::unordered_map<std::string, std::uint32_t> inventory;
     if (!ap || !IsConnected()) return inventory;
 
+    std::unordered_map<int64_t, std::uint32_t> occurrences;
     for (const auto& [index, item] : receivedItems_) {
+        // ReceivedItems is the server's complete delivery history, including entries which are still waiting
+        // behind a rejected native grant. Reachability must follow the durable award ledger, not run ahead of
+        // the player's actual inventory merely because a later item is already present in that history.
+        const auto awarded = awardedItemCounts_.find(item.item);
+        const std::uint32_t awardedOccurrences =
+            awarded == awardedItemCounts_.end() ? 0u : awarded->second;
+        if (++occurrences[item.item] > awardedOccurrences) continue;
         const std::string itemName = GetDisplayItemName(item.item);
         if (!itemName.empty()) inventory[itemName]++;
     }
@@ -349,7 +380,7 @@ size_t Archipelago::SendMissingClearedLocations() {
     LoadClearedLocations();
     const auto missingLocations = ap->get_missing_locations();
     const auto checkedLocations = ap->get_checked_locations();
-    std::set<int64_t> locations;
+    std::unordered_set<int64_t> locations;
     std::string locationNames;
     for (const auto& clearedLocation : clearedLocations_) {
         auto resolution = ResolveLocation(clearedLocation, missingLocations, checkedLocations);
@@ -364,7 +395,9 @@ size_t Archipelago::SendMissingClearedLocations() {
     Logger::Log(LogLevel::File, "[AP] Submitting missing cleared locations:", locationNames, "resolved IDs:",
                 locations.size());
     try {
-        ap->LocationChecks(std::list<int64_t>(locations.begin(), locations.end()));
+        std::list<int64_t> sortedLocations(locations.begin(), locations.end());
+        sortedLocations.sort();
+        ap->LocationChecks(sortedLocations);
     } catch (const std::exception& exception) {
         Logger::Log(LogLevel::File, "[AP] Location-check send failed; checks remain journaled for reconnect:",
                     exception.what());
@@ -381,13 +414,13 @@ void Archipelago::ReconcileCompletedBossShardLocations() {
     if (!gameInstance) return;
 
     const auto missingLocations = ap->get_missing_locations();
-    for (const std::string_view enemyId : BOSS_SHARD_ENEMY_IDS) {
-        const std::string locationName = std::string(enemyId) + "_Shard";
+    for (const auto& bossLocation : BOSS_SHARD_LOCATIONS) {
+        const std::string locationName(bossLocation.location_id);
         const auto locationId = GetLocationId(locationName);
         // Do not journal boss state for an older or differently configured world which has no such check.
         if (!locationId || !missingLocations.contains(*locationId)) continue;
 
-        if (!gameInstance->IsCompletedBoss(FNameFromString(std::string(enemyId)))) continue;
+        if (!gameInstance->IsCompletedBoss(FNameFromString(std::string(bossLocation.boss_id)))) continue;
 
         const std::string nativeLocationName = "AP_" + locationName;
         Logger::Log(LogLevel::File, "[AP] Recovered completed boss shard location from save:",
@@ -415,6 +448,9 @@ LocationCheckResult Archipelago::SendLocationChecks(const std::string& locationI
                                                                       : LocationCheckResult::NotReady;
     }
 
+    if (!wasClearedLocally && !requestedLocation.missing.empty()) {
+        InGameTracker::Instance().AuditLocationClear(locationId);
+    }
     SendMissingClearedLocations();
     return requestedLocation.missing.empty() ? LocationCheckResult::AlreadyChecked : LocationCheckResult::Sent;
 }
@@ -482,7 +518,7 @@ void Archipelago::SaveConnectionInfo() const {
     SaveLocalString(CONNECTION_SAVE_PREFIX + "Slot", slotName_);
     SaveLocalString(CONNECTION_SAVE_PREFIX + "Password", password_);
 
-    SaveLocalValue(CONNECTION_SAVE_PREFIX + "DeathLink", wantsDeathlink_ ? 1 : 0);
+    SaveLocalValue(CONNECTION_SAVE_PREFIX + "DeathLink", static_cast<int32_t>(deathLinkMode_));
     SaveLocalValue(CONNECTION_SAVE_PREFIX + "Version", CONNECTION_SAVE_VERSION);
     Logger::Log("[AP] Saved successful connection info to the current save");
 }
@@ -524,7 +560,10 @@ bool Archipelago::ApplyConnectedEnemyDropShuffle(const std::string& seedName, st
 std::optional<ArchipelagoConnectionInfo> Archipelago::LoadSavedConnectionInfo() const {
     if (!HasCurrentSaveSchema()) return std::nullopt;
     auto version = LoadSavedValue(CONNECTION_SAVE_PREFIX + "Version");
-    if (!version || *version != CONNECTION_SAVE_VERSION) return std::nullopt;
+    if (!version || (*version != CONNECTION_SAVE_VERSION &&
+                     *version != LEGACY_BOOLEAN_DEATHLINK_CONNECTION_SAVE_VERSION)) {
+        return std::nullopt;
+    }
 
     auto uri = LoadSavedString(CONNECTION_SAVE_PREFIX + "Uri");
     auto slotName = LoadSavedString(CONNECTION_SAVE_PREFIX + "Slot");
@@ -532,7 +571,17 @@ std::optional<ArchipelagoConnectionInfo> Archipelago::LoadSavedConnectionInfo() 
     auto deathLink = LoadSavedValue(CONNECTION_SAVE_PREFIX + "DeathLink");
     if (!uri || !slotName || !password || !deathLink || slotName->empty()) return std::nullopt;
 
-    return ArchipelagoConnectionInfo{*uri, *slotName, *password, *deathLink != 0};
+    DeathLinkMode deathLinkMode = DeathLinkMode::Off;
+    if (*version == LEGACY_BOOLEAN_DEATHLINK_CONNECTION_SAVE_VERSION) {
+        deathLinkMode = *deathLink != 0 ? DeathLinkMode::GameOver : DeathLinkMode::Off;
+    } else if (*deathLink >= static_cast<int32_t>(DeathLinkMode::Off) &&
+               *deathLink <= static_cast<int32_t>(DeathLinkMode::GameOver)) {
+        deathLinkMode = static_cast<DeathLinkMode>(*deathLink);
+    } else {
+        return std::nullopt;
+    }
+
+    return ArchipelagoConnectionInfo{*uri, *slotName, *password, deathLinkMode};
 }
 
 bool Archipelago::HasCurrentSaveSchema() const {
@@ -566,9 +615,13 @@ bool Archipelago::ValidateSlotAndSave(const json& slotData) {
         lastError_ = "This slot has no Bloodstained difficulty setting";
         return false;
     }
-    if (!slotData.contains("content_policy") || !slotData.at("content_policy").is_string() ||
-        slotData.at("content_policy").get<std::string>() != CONTENT_POLICY) {
-        lastError_ = "This slot does not use the supported base-and-free-content policy";
+    if (!slotData.contains("content_policy") || !slotData.at("content_policy").is_string()) {
+        lastError_ = "This slot has no supported Bloodstained content policy";
+        return false;
+    }
+    const auto contentPolicy = slotData.at("content_policy").get<std::string>();
+    if (contentPolicy != LEGACY_CONTENT_POLICY && contentPolicy != CONTENT_POLICY) {
+        lastError_ = "This slot does not use a supported Bloodstained content policy";
         return false;
     }
 
@@ -598,6 +651,39 @@ bool Archipelago::ValidateSlotAndSave(const json& slotData) {
     Logger::Log(LogLevel::File, "[AP] Initialized static-pak save schema:", STATIC_PAK_SCHEMA,
                 "difficulty:", expectedDifficulty);
     return true;
+}
+
+bool Archipelago::ValidateRequiredDlcLocations() {
+    lastError_.clear();
+    if (!ap) {
+        lastError_ = "DLC ownership could not be verified; reconnect after game initialization completes.";
+        return false;
+    }
+
+    const auto igaShardLocation = GetLocationId("N2013_Shard");
+    if (!igaShardLocation) {
+        lastError_ = "The client has no generated binding for the IGA shard location.";
+        return false;
+    }
+
+    const bool igaShardIsActive = ap->get_missing_locations().contains(*igaShardLocation) ||
+                                  ap->get_checked_locations().contains(*igaShardLocation);
+    if (!igaShardIsActive) return true;
+
+    switch (GameManager::Instance().GetDlcOwnership("DLC_0002")) {
+        case DlcOwnership::Owned:
+            return true;
+        case DlcOwnership::NotOwned:
+            lastError_ = "This multiworld includes the IGA shard location. Purchase and install IGA's Back Pack before connecting.";
+            return false;
+        case DlcOwnership::NotReady:
+            lastError_ = "IGA's Back Pack ownership could not be verified; reconnect after DLC initialization completes.";
+            return false;
+        case DlcOwnership::NotApplicable:
+            break;
+    }
+    lastError_ = "IGA's Back Pack ownership could not be verified; reconnect after DLC initialization completes.";
+    return false;
 }
 
 bool Archipelago::LoadLocalProgress() {
@@ -641,7 +727,7 @@ bool Archipelago::LoadEntitlementLedger() {
             const std::string prefix = ledgerPrefix + "EntitlementLedger" + std::to_string(entry);
             const auto itemId = LoadInt64(prefix + "Item");
             const auto count = LoadSavedValue(prefix + "Count");
-            if (!itemId || !count || *count <= 0 || !GetNativeItemName(*itemId)) {
+            if (!itemId || !count || *count <= 0 || !IsKnownItemId(*itemId)) {
                 discardedEntries++;
                 continue;
             }
@@ -772,7 +858,9 @@ void Archipelago::ProcessReceivedItems() {
 
     const auto& item = *itemToGrant;
     const int64_t itemIndex = item.index;
-    const auto nativeItemName = GetNativeItemName(item.item);
+    const auto progressiveItemName = bloodstained::items::ResolveProgressiveItem(
+        static_cast<std::uint64_t>(item.item), awardedItemCounts_[item.item]);
+    const auto nativeItemName = progressiveItemName ? progressiveItemName : GetNativeItemName(item.item);
     const std::string itemName = nativeItemName ? std::string(*nativeItemName) : std::string();
     const std::string displayItemName = GetDisplayItemName(item.item);
     const std::string savePrefix = localSavePrefix_;
@@ -814,6 +902,7 @@ void Archipelago::CompleteReceivedItem(int64_t itemIndex, int64_t itemId, const 
 
     awardedItemCounts_[itemId]++;
     PersistAwardedItemCounts();
+    InGameTracker::Instance().InvalidateReachability("AP received item committed");
     receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_INTERVAL;
     if (result == ItemGrantResult::AtCapacity) {
         Logger::Log(LogLevel::File, "[AP] Received item already at native inventory capacity:", itemName,
@@ -839,6 +928,12 @@ void Archipelago::ReconcileReceivedProgressionInventory() {
         const auto nativeItemName = GetNativeItemName(item.item);
         if (!nativeItemName) continue;
         std::string itemName(*nativeItemName);
+        const auto dlcOwnership = GameManager::Instance().GetPaidDlcItemOwnership(itemName);
+        if (dlcOwnership == DlcOwnership::NotOwned) continue;
+        if (dlcOwnership == DlcOwnership::NotReady) {
+            receivedItemRetryAt_ = std::chrono::steady_clock::now() + ITEM_GRANT_RETRY_DELAY;
+            return;
+        }
         const auto itemId = GameManager::Instance().GetIdFromDisplayName(itemName);
         if (!itemId) continue;
 
@@ -915,7 +1010,7 @@ void Archipelago::BaelDefeated() {
 
 void Archipelago::InvokeDeathLink() {
     if (!ap) return;
-    if (!wantsDeathlink_) return;
+    if (deathLinkMode_ == DeathLinkMode::Off) return;
     deathtime = ap->get_server_time();
     int causeOfDeathNum = std::rand() % deathReasons_.size();
     std::list<std::string>::iterator it = deathReasons_.begin();
@@ -927,6 +1022,27 @@ void Archipelago::InvokeDeathLink() {
     };
     ap->Bounce(data, {}, {}, {"DeathLink"});
     ap->poll();
+}
+
+void Archipelago::SetDeathLinkMode(DeathLinkMode deathLinkMode) {
+    if (deathLinkMode < DeathLinkMode::Off || deathLinkMode > DeathLinkMode::GameOver) return;
+    if (deathLinkMode_ == deathLinkMode) return;
+
+    const bool wasEnabled = deathLinkMode_ != DeathLinkMode::Off;
+    const bool isEnabled = deathLinkMode != DeathLinkMode::Off;
+    deathLinkMode_ = deathLinkMode;
+    if (!isEnabled) pendingDeathlink_ = false;
+
+    if (ap && wasEnabled != isEnabled) {
+        std::list<std::string> tags;
+        if (isEnabled) tags.push_back("DeathLink");
+        const bool updated = ap->ConnectUpdate(false, itemsHandling_, true, tags);
+        Logger::Log(LogLevel::File, "[AP] Updated DeathLink server tag; enabled:", isEnabled,
+                    "accepted:", updated);
+    }
+
+    Logger::Log(LogLevel::File, "[AP] DeathLink consequence mode:", static_cast<int32_t>(deathLinkMode_));
+    if (state_ == ArchipelagoConnectionState::SlotConnected) SaveConnectionInfo();
 }
 
 bool Archipelago::GivePlayerItem(const std::string& itemName, bool shouldDisplay,
@@ -976,8 +1092,8 @@ bool Archipelago::GivePlayerItem(const std::string& itemName, bool shouldDisplay
     }
 }
 
-bool Archipelago::Connect(const std::string& slotName, const std::string& password, const std::string uri = "",
-                          const bool& wantsDeathlink = false) {
+bool Archipelago::Connect(const std::string& slotName, const std::string& password, const std::string uri,
+                          DeathLinkMode deathLinkMode) {
     if (!GameManager::Instance().IsPlayerLoadedInGame()) {
         Logger::Log("Player is not loaded in game");
         return false;
@@ -990,13 +1106,11 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
 
     slotName_ = slotName;
     password_ = password;
-    std::string normalizedUri = uri;
-    if (normalizedUri.starts_with("ws://")) normalizedUri.erase(0, 5);
-    if (normalizedUri.starts_with("wss://")) normalizedUri.erase(0, 6);
-    currentUri_ = normalizedUri;
-    wantsDeathlink_ = wantsDeathlink;
+    const std::string serverUri = bloodstained::connection::PrepareServerUri(uri, APClient::DEFAULT_URI);
+    currentUri_ = serverUri;
+    deathLinkMode_ = deathLinkMode;
     Logger::Log(LogLevel::File, "[AP] Connecting slot:", slotName_, "server:",
-                normalizedUri.empty() ? APClient::DEFAULT_URI : normalizedUri);
+                serverUri);
     ResetLocalLocationCache();
     localSavePrefix_.clear();
     slotData_ = json{};
@@ -1010,15 +1124,14 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     HookManager::ResetShardDropPolicy();
     InGameTracker::Instance().ResetConnection();
 
-    Logger::Log(LogLevel::Debug, "[AP]", "Connecting Player: ", slotName_, "with uri: ", normalizedUri);
+    Logger::Log(LogLevel::Debug, "[AP]", "Connecting Player: ", slotName_, "with uri: ", serverUri);
     UpdateState(ArchipelagoConnectionState::Connecting);
 
     ap.reset();
-    std::string uri_without_scheme = normalizedUri.empty() ? APClient::DEFAULT_URI : normalizedUri;
+    const std::string uuidHost(bloodstained::connection::RemoveWebSocketScheme(serverUri));
+    std::string uuid = ap_get_uuid(UUID_FILE, uuidHost);
 
-    std::string uuid = ap_get_uuid(UUID_FILE, uri_without_scheme);
-
-    ap.reset(new APClient(uuid, GAME_NAME, normalizedUri.empty() ? APClient::DEFAULT_URI : normalizedUri, CERT_STORE));
+    ap.reset(new APClient(uuid, GAME_NAME, serverUri, CERT_STORE));
     game_seed = ap->get_seed();
 
     ap_slot_connect_sent = false;
@@ -1116,7 +1229,7 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
         slotData_ = slotData;
         localSavePrefix_ = "AP_" + ap->get_seed() + "_" + std::to_string(ap->get_team_number()) + "_" +
                            std::to_string(ap->get_player_number()) + "_";
-        if (!ValidateSlotAndSave(slotData) || !LoadLocalProgress()) {
+        if (!ValidateRequiredDlcLocations() || !ValidateSlotAndSave(slotData) || !LoadLocalProgress()) {
             Logger::Log(LogLevel::File, "[AP] Rejecting slot for active save:", lastError_);
             GameManager::Instance().SendInGameNotification(lastError_, 1023);
             UpdateState(ArchipelagoConnectionState::InvalidSlotError);
@@ -1201,28 +1314,33 @@ bool Archipelago::Connect(const std::string& slotName, const std::string& passwo
     });
 
     ap->set_bounced_handler([this, slotName](const json& cmd) {
-        if (wantsDeathlink_) {
-            Logger::Log("Recieved DeathLink");
-            auto tagsIt = cmd.find("tags");
-            auto dataIt = cmd.find("data");
-            if (tagsIt != cmd.end() && tagsIt->is_array() &&
-                std::find(tagsIt->begin(), tagsIt->end(), "DeathLink") != tagsIt->end()) {
-                if (dataIt != cmd.end() && dataIt->is_object()) {
-                    json data = *dataIt;
-                    if (data["source"].get<std::string>() != slotName) {
-                        std::string source =
-                            data["source"].is_string() ? data["source"].get<std::string>().c_str() : "???";
-                        std::string cause =
-                            data["cause"].is_string() ? data["cause"].get<std::string>().c_str() : "???";
-                        GameManager::Instance().SendInGameNotification(source + ": " + cause, 346);  // 346 for skull id
-                        Logger::Log("Died by the hands of " + source + " : " + cause);
-                        pendingDeathlink_ = true;
-                    }
-                } else {
-                    Logger::Log("Bad deathlink packet!");
-                }
-            }
+        if (deathLinkMode_ == DeathLinkMode::Off) return;
+
+        const auto tagsIt = cmd.find("tags");
+        if (tagsIt == cmd.end() || !tagsIt->is_array() ||
+            std::find(tagsIt->begin(), tagsIt->end(), "DeathLink") == tagsIt->end()) {
+            return;
         }
+
+        const auto dataIt = cmd.find("data");
+        if (dataIt == cmd.end() || !dataIt->is_object()) {
+            Logger::Log(LogLevel::File, "[AP] Ignored malformed DeathLink packet");
+            return;
+        }
+
+        const auto sourceIt = dataIt->find("source");
+        const auto causeIt = dataIt->find("cause");
+        const std::string source = sourceIt != dataIt->end() && sourceIt->is_string()
+                                       ? sourceIt->get<std::string>()
+                                       : "???";
+        if (source == slotName) return;
+
+        const std::string cause = causeIt != dataIt->end() && causeIt->is_string()
+                                      ? causeIt->get<std::string>()
+                                      : "???";
+        GameManager::Instance().SendInGameNotification(source + ": " + cause, 346);
+        Logger::Log(LogLevel::File, "[AP] Received DeathLink from:", source, "cause:", cause);
+        pendingDeathlink_ = true;
     });
 
     return true;

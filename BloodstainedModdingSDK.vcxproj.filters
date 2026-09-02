@@ -178,6 +178,9 @@
     <ClInclude Include="Mod\ClientVersion.h">
       <Filter>Source Files\Mod\Headers</Filter>
     </ClInclude>
+    <ClInclude Include="Mod\ConnectionUri.h">
+      <Filter>Source Files\Mod\Headers</Filter>
+    </ClInclude>
     <ClInclude Include="Mod\MainMenuStatus.h">
       <Filter>Source Files\Mod\Headers</Filter>
     </ClInclude>

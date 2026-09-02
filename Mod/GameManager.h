@@ -14,6 +14,7 @@
 #include <ProjectBlood_structs.hpp>
 #include <UnrealContainers.hpp>
 #include <functional>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -23,6 +24,7 @@
 #include "ProjectBlood_classes.hpp"
 
 enum class ItemGrantResult { Granted, AtCapacity, Unsupported, Rejected };
+enum class DlcOwnership { NotApplicable, Owned, NotOwned, NotReady };
 
 class GameManager {
    public:
@@ -67,6 +69,12 @@ class GameManager {
     bool IsInstanceValid(SDK::UObject* object, const char* str);
     bool PopulateDisplayToItemIdTable();
     bool CanReceiveItems();
+    DlcOwnership GetDlcOwnership(std::string_view dlcKey) const;
+    DlcOwnership GetPaidDlcItemOwnership(std::string_view nativeItemId) const;
+    bool IsPaidDlcShard(std::string_view nativeItemId) const;
+    bool PrimeOwnedPaidDlcCatalogRows();
+    void SuppressRandomizedDlcCatalogRowsForNewGame();
+    void RestoreRandomizedDlcCatalogRowsAfterNewGameInit();
 
     void GivePlayerItem(const std::string& name, bool shouldDisplay = true, int count = 1,
                         std::function<void(ItemGrantResult)> completion = {});
@@ -77,6 +85,8 @@ class GameManager {
                                                          const std::string& itemName);
     std::optional<SDK::FPBItemCatalogData> CheckAllInventories(const std::string& itemName);
     bool UnlockEquipmentInShop(const std::string& itemName);
+    void ApplyWaystoneSafety();
+    bool TryUseWaystone();
 
     bool CanKillPlayer();
     void KillPlayer();
@@ -121,6 +131,9 @@ class GameManager {
     bool initCompleted;
     bool postInitCompleted;
     bool isPlayerDead = false;
+    bool paidDlcCatalogPrimed_ = false;
+    bool paidDlcCatalogPendingLogged_ = false;
+    bool suppressRandomizedDlcCatalogForNewGame_ = false;
 
     // m17RVA_008
     const std::unordered_set<std::string> bossRooms = {"m01SIP_000", "m01SIP_022", "m09TRN_002",

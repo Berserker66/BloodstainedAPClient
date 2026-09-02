@@ -1,5 +1,6 @@
 #include "QualityOfLife.h"
 
+#include <chrono>
 #include <ProjectBlood_classes.hpp>
 #include <ProjectBlood_parameters.hpp>
 
@@ -117,11 +118,14 @@ void QualityOfLife::SetAutoSellWastedShardsEnabled(bool enabled) {
     Logger::Log(LogLevel::File, "[QoL] Set auto-sell wasted shards:", enabled);
 }
 
-void QualityOfLife::AcceptAvailableBountyHunts() {
+void QualityOfLife::AcceptAvailableBountyHunts(bool logWhenNoChanges) {
     auto* questManager = SDK::UPBQuestManager::GetQuestManager();
     auto* questTable = questManager ? questManager->GetQuestTable() : nullptr;
     if (!questManager || !questTable) {
-        Logger::Log(LogLevel::File, "[QoL] Could not auto-accept bounty hunts because quest data is unavailable");
+        if (logWhenNoChanges) {
+            Logger::Log(LogLevel::File,
+                        "[QoL] Could not auto-accept bounty hunts because quest data is unavailable");
+        }
         return;
     }
 
@@ -140,7 +144,9 @@ void QualityOfLife::AcceptAvailableBountyHunts() {
         acceptedCount++;
     }
 
-    Logger::Log(LogLevel::File, "[QoL] Auto-accepted available bounty hunts:", acceptedCount);
+    if (acceptedCount > 0 || logWhenNoChanges) {
+        Logger::Log(LogLevel::File, "[QoL] Auto-accepted available bounty hunts:", acceptedCount);
+    }
 
     // Accepted quests persist their own copy of EnemyLocations. Repair every invalid
     // shipped marker in place so this covers both old saves and quests accepted above.
@@ -185,6 +191,15 @@ void QualityOfLife::AcceptAvailableBountyHunts() {
         Logger::Log(LogLevel::File, "[QoL] Repaired invalid bounty hunt map markers:",
                     repairedMarkerCount);
     }
+}
+
+void QualityOfLife::TickAutoAcceptBountyHunts() {
+    using namespace std::chrono_literals;
+    static auto nextScan = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now < nextScan) return;
+    nextScan = now + 1s;
+    AcceptAvailableBountyHunts(false);
 }
 
 void QualityOfLife::SellRepeatedShardNow(const SDK::FName& vanillaShardId) {

@@ -91,5 +91,16 @@ class HookManager {
     static std::set<std::string> processedWidgets;
     static void (*originalProcessEvent)(SDK::UObject*, SDK::UFunction*, void*);
     static void (*originalProcessLocalScriptFunction)(SDK::UObject*, SDK::UFunction*, void*);
+    using UseConsumableNative = bool (*)(SDK::UPBCharacterInventoryComponent*, SDK::FName, bool, bool);
+    using RoomTransitionNative = bool (*)(SDK::UPBRoomManager*, SDK::FName, bool, SDK::FName,
+                                          const SDK::FLinearColor*);
+    static UseConsumableNative originalUseConsumable;
+    static RoomTransitionNative originalRoomTransition;
+    static bool pendingPreTownWaystone;
+    static bool HOOKED_UseConsumable(SDK::UPBCharacterInventoryComponent* inventory, SDK::FName itemId,
+                                     bool noRemove, bool byFamilia);
+    static bool HOOKED_RoomTransition(SDK::UPBRoomManager* roomManager, SDK::FName roomId,
+                                      bool transitionFlag, SDK::FName preferredSpawnPointName,
+                                      const SDK::FLinearColor* fadeColor);
     static void ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, void* params);
 };

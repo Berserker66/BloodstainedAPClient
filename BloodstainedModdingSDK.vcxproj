@@ -231,6 +231,7 @@
     <ClInclude Include="Mod\IToggleMod.h" />
     <ClInclude Include="Mod\Logger.h" />
     <ClInclude Include="Mod\ClientVersion.h" />
+    <ClInclude Include="Mod\ConnectionUri.h" />
     <ClInclude Include="Mod\EnemyDropData.generated.h" />
     <ClInclude Include="Mod\EnemyDropShuffle.h" />
     <ClInclude Include="Mod\EnemyDropShuffleLogic.h" />

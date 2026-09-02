@@ -10,6 +10,7 @@
 
 #include "APBridge.h"
 #include "Archipelago.h"
+#include "ConnectionUri.h"
 #include "GameManager.h"
 #include "HookManager.h"
 #include "InGameTracker.h"
@@ -51,16 +52,73 @@ static char s_Console[256] = "";
 #endif
 
 static bool s_Connected = false;
-static bool s_wantsDeathlink = false;
+static DeathLinkMode s_deathLinkMode = DeathLinkMode::Off;
+constexpr const char* DEATH_LINK_MODE_NAMES[] = {
+    "Off",
+    "Consequence: Waystone",
+    "Consequence: Game Over",
+};
+
+static bool RenderDeathLinkModeCombo(const char* id, DeathLinkMode& mode) {
+    const int modeIndex = std::clamp(static_cast<int>(mode), 0,
+                                     static_cast<int>(IM_ARRAYSIZE(DEATH_LINK_MODE_NAMES)) - 1);
+    bool changed = false;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo(id, DEATH_LINK_MODE_NAMES[modeIndex])) {
+        for (int candidate = 0; candidate < IM_ARRAYSIZE(DEATH_LINK_MODE_NAMES); ++candidate) {
+            const bool selected = modeIndex == candidate;
+            if (ImGui::Selectable(DEATH_LINK_MODE_NAMES[candidate], selected)) {
+                mode = static_cast<DeathLinkMode>(candidate);
+                changed = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+static bool BeginSettingsTable(const char* id) {
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) return false;
+    ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+    ImGui::TableSetupColumn("Control", ImGuiTableColumnFlags_WidthStretch);
+    return true;
+}
+
+static void BeginSettingRow(const char* label) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::TableSetColumnIndex(1);
+}
+
+static void RenderTrackerModeCombo() {
+    constexpr const char* TRACKER_MODE_NAMES[] = {"None", "Main Map", "Mini Map", "Full"};
+    const auto trackerMode = InGameTracker::Instance().GetDisplayMode();
+    const int trackerModeIndex = static_cast<int>(trackerMode);
+
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##In-game tracking", TRACKER_MODE_NAMES[trackerModeIndex])) {
+        for (int modeIndex = 0; modeIndex < IM_ARRAYSIZE(TRACKER_MODE_NAMES); ++modeIndex) {
+            const bool selected = trackerModeIndex == modeIndex;
+            if (ImGui::Selectable(TRACKER_MODE_NAMES[modeIndex], selected)) {
+                const auto selectedMode = static_cast<TrackerDisplayMode>(modeIndex);
+                ThreadQueue::Instance().Enqueue(
+                    [selectedMode] { InGameTracker::Instance().SetDisplayMode(selectedMode); });
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+}
 
 static void CopyConnectionField(char* destination, size_t destinationSize, const std::string& value) {
     strncpy_s(destination, destinationSize, value.c_str(), _TRUNCATE);
 }
 
 static void PopulateConnectionFields(const ArchipelagoConnectionInfo& connectionInfo) {
-    std::string address = connectionInfo.uri;
-    if (address.starts_with("ws://")) address.erase(0, 5);
-    if (address.starts_with("wss://")) address.erase(0, 6);
+    std::string address(bloodstained::connection::RemoveWebSocketScheme(connectionInfo.uri));
 
     size_t portSeparator = address.rfind(':');
     std::string host = portSeparator == std::string::npos ? address : address.substr(0, portSeparator);
@@ -69,7 +127,7 @@ static void PopulateConnectionFields(const ArchipelagoConnectionInfo& connection
     CopyConnectionField(s_Port, IM_ARRAYSIZE(s_Port), port);
     CopyConnectionField(s_SlotName, IM_ARRAYSIZE(s_SlotName), connectionInfo.slotName);
     CopyConnectionField(s_Password, IM_ARRAYSIZE(s_Password), connectionInfo.password);
-    s_wantsDeathlink = connectionInfo.wantsDeathlink;
+    s_deathLinkMode = connectionInfo.deathLinkMode;
 }
 
 static void RenderArchipelagoPanel() {
@@ -80,34 +138,37 @@ static void RenderArchipelagoPanel() {
     }
 
     if (!s_Connected) {
-        ImGui::Text("Host    ");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(256);
-        ImGui::InputText("##Host", s_Host, IM_ARRAYSIZE(s_Host));
+        if (BeginSettingsTable("##ConnectionSettings")) {
+            BeginSettingRow("Host");
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##Host", s_Host, IM_ARRAYSIZE(s_Host));
 
-        ImGui::Text("Port    ");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(256);
-        ImGui::InputText("##Port", s_Port, IM_ARRAYSIZE(s_Port));
+            BeginSettingRow("Port");
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##Port", s_Port, IM_ARRAYSIZE(s_Port));
 
-        ImGui::Text("Slot    ");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(256);
-        ImGui::InputText("##Slot Name", s_SlotName, IM_ARRAYSIZE(s_SlotName));
+            BeginSettingRow("Slot");
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##Slot Name", s_SlotName, IM_ARRAYSIZE(s_SlotName));
 
-        ImGui::Text("Password");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(256);
-        ImGui::InputText("##Password", s_Password, IM_ARRAYSIZE(s_Password), ImGuiInputTextFlags_Password);
+            BeginSettingRow("Password");
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##Password", s_Password, IM_ARRAYSIZE(s_Password), ImGuiInputTextFlags_Password);
 
-        ImGui::Checkbox("DeathLink", &s_wantsDeathlink);
+            BeginSettingRow("DeathLink");
+            RenderDeathLinkModeCombo("##DeathLink", s_deathLinkMode);
+
+            BeginSettingRow("In-game tracking");
+            RenderTrackerModeCombo();
+            ImGui::EndTable();
+        }
 
         if (ImGui::Button("Connect")) {
             std::string uri = std::string(s_Host) + ":" + s_Port;
 
             if (s_SlotName[0] != '\0') {
                 Logger::Log("Tried to connect to AP");
-                APBridge::Instance().EnqueueConnect(s_SlotName, s_Password, uri, s_wantsDeathlink);
+                APBridge::Instance().EnqueueConnect(s_SlotName, s_Password, uri, s_deathLinkMode);
             } else {
                 Logger::Log("Cannot connect to Archipelago with empty slotName");
             }
@@ -138,31 +199,31 @@ static void RenderArchipelagoPanel() {
     } else {
         ImGui::Text("Connected as: %s", s_SlotName);
         ImGui::Text("Archipelago Connection State: %s", Archipelago::Instance().GetStateAsString().c_str());
+        auto activeDeathLinkMode = Archipelago::Instance().GetDeathLinkMode();
+        s_deathLinkMode = activeDeathLinkMode;
+
+        if (BeginSettingsTable("##ConnectedSettings")) {
+            BeginSettingRow("DeathLink");
+            if (RenderDeathLinkModeCombo("##ConnectedDeathLink", activeDeathLinkMode)) {
+                s_deathLinkMode = activeDeathLinkMode;
+                ThreadQueue::Instance().Enqueue([activeDeathLinkMode] {
+                    Archipelago::Instance().SetDeathLinkMode(activeDeathLinkMode);
+                });
+            }
+
+            BeginSettingRow("In-game tracking");
+            RenderTrackerModeCombo();
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
         if (ImGui::Button("Disconnect")) {
             Logger::Log("Disconnecting from Archipelago");
             APBridge::Instance().EnqueueDisconnect();
         }
     }
-
-    constexpr const char* TRACKER_MODE_NAMES[] = {"None", "Main Map", "Mini Map", "Full"};
-    const auto trackerMode = InGameTracker::Instance().GetDisplayMode();
-    const int trackerModeIndex = static_cast<int>(trackerMode);
-    ImGui::Text("In-game tracking");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160);
-    if (ImGui::BeginCombo("##In-game tracking", TRACKER_MODE_NAMES[trackerModeIndex])) {
-        for (int modeIndex = 0; modeIndex < IM_ARRAYSIZE(TRACKER_MODE_NAMES); ++modeIndex) {
-            const bool selected = trackerModeIndex == modeIndex;
-            if (ImGui::Selectable(TRACKER_MODE_NAMES[modeIndex], selected)) {
-                const auto selectedMode = static_cast<TrackerDisplayMode>(modeIndex);
-                ThreadQueue::Instance().Enqueue(
-                    [selectedMode] { InGameTracker::Instance().SetDisplayMode(selectedMode); });
-            }
-            if (selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-
 }
 
 static void RenderQualityOfLifePanel() {
@@ -266,7 +327,7 @@ void Gui::TryAutoConnect() {
     PopulateConnectionFields(*connectionInfo);
     Logger::Log("[AP] Trying the saved connection once");
     APBridge::Instance().EnqueueConnect(connectionInfo->slotName, connectionInfo->password, connectionInfo->uri,
-                                        connectionInfo->wantsDeathlink);
+                                        connectionInfo->deathLinkMode);
 }
 
 // Verified 100% correct, DO NOT MODIFY

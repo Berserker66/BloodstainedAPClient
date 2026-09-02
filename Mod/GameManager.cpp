@@ -9,6 +9,7 @@
 #include <ProjectBlood_structs.hpp>
 #include <UnrealContainers.hpp>
 #include <algorithm>
+#include <array>
 #include <format>
 #include <utility>
 
@@ -24,36 +25,92 @@
 
 namespace {
 
-enum class PaidDlcItemPreparation { Ready, NotOwned, NotReady };
+constexpr std::string_view WAYSTONE_ITEM_ID = "Waystone";
+constexpr int WAYSTONE_QUANTITY = 5;
 
-PaidDlcItemPreparation PrepareOwnedIgaCatalogRow(const std::string& itemId) {
-    auto* dlcManager = SDK::UPBDLCManager::GetInstance();
-    if (!dlcManager) return PaidDlcItemPreparation::NotReady;
-    const auto igaDlc = FNameFromString("DLC_0002");
-    if (!dlcManager->HasDLC(igaDlc)) {
-        Logger::Log(LogLevel::File, "[AP] Paid IGA item is unsupported without DLC_0002:", itemId);
-        return PaidDlcItemPreparation::NotOwned;
+struct FreeUpdateItemBinding {
+    std::string_view nativeName;
+    SDK::ECarriedCatalog category;
+};
+
+// These free-update items are part of the randomizer's ordinary item pool, but
+// vanilla grants them automatically when a new save is created. Keep their
+// expected categories here so the new-game grant can be suppressed temporarily
+// without affecting later Archipelago deliveries.
+constexpr std::array FREE_UPDATE_ITEM_BINDINGS = {
+    FreeUpdateItemBinding{"PirateGun1", SDK::ECarriedCatalog::Weapon},
+    FreeUpdateItemBinding{"PirateGun3", SDK::ECarriedCatalog::Weapon},
+    FreeUpdateItemBinding{"PirateGun5", SDK::ECarriedCatalog::Weapon},
+    FreeUpdateItemBinding{"PirateSword1", SDK::ECarriedCatalog::Weapon},
+    FreeUpdateItemBinding{"PirateSword3", SDK::ECarriedCatalog::Weapon},
+    FreeUpdateItemBinding{"PirateSword5", SDK::ECarriedCatalog::Weapon},
+    FreeUpdateItemBinding{"ShantaeBandana", SDK::ECarriedCatalog::Head},
+    FreeUpdateItemBinding{"ShantaeOutfit1", SDK::ECarriedCatalog::Body},
+    FreeUpdateItemBinding{"ShantaeOutfit3", SDK::ECarriedCatalog::Body},
+    FreeUpdateItemBinding{"ShantaeOutfit5", SDK::ECarriedCatalog::Body},
+    FreeUpdateItemBinding{"ShantaeVest", SDK::ECarriedCatalog::Accessory1},
+    FreeUpdateItemBinding{"ShantaeTiara", SDK::ECarriedCatalog::Accessory1},
+    FreeUpdateItemBinding{"JourneyScarf", SDK::ECarriedCatalog::Muffler},
+    FreeUpdateItemBinding{"Fireball", SDK::ECarriedCatalog::DirectionalShard},
+};
+
+const bloodstained::tracker::generated::PaidDlcItemBinding* FindPaidDlcItem(std::string_view itemId) {
+    const auto& bindings = bloodstained::tracker::generated::PAID_DLC_ITEM_BINDINGS;
+    const auto binding = std::find_if(bindings.begin(), bindings.end(), [itemId](const auto& entry) {
+        return entry.native_name == itemId;
+    });
+    return binding == bindings.end() ? nullptr : &*binding;
+}
+
+SDK::ECarriedCatalog NativeCategory(
+    bloodstained::tracker::generated::ItemCatalogCategory category) {
+    using Category = bloodstained::tracker::generated::ItemCatalogCategory;
+    switch (category) {
+        case Category::WEAPON: return SDK::ECarriedCatalog::Weapon;
+        case Category::HEAD: return SDK::ECarriedCatalog::Head;
+        case Category::BODY: return SDK::ECarriedCatalog::Body;
+        case Category::ACCESSORY1: return SDK::ECarriedCatalog::Accessory1;
+        case Category::MUFFLER: return SDK::ECarriedCatalog::Muffler;
+        case Category::TRIGGERSHARD: return SDK::ECarriedCatalog::TriggerShard;
+        case Category::FAMILIARSHARD: return SDK::ECarriedCatalog::FamiliarShard;
     }
+    return SDK::ECarriedCatalog::None;
+}
+
+bool IsShardCategory(SDK::ECarriedCatalog category) {
+    return category == SDK::ECarriedCatalog::TriggerShard ||
+           category == SDK::ECarriedCatalog::EffectiveShard ||
+           category == SDK::ECarriedCatalog::DirectionalShard ||
+           category == SDK::ECarriedCatalog::EnchantShard ||
+           category == SDK::ECarriedCatalog::FamiliarShard ||
+           category == SDK::ECarriedCatalog::AllShard;
+}
+
+DlcOwnership PreparePaidDlcCatalogRow(const std::string& itemId) {
+    const auto* binding = FindPaidDlcItem(itemId);
+    if (!binding) return DlcOwnership::NotApplicable;
+    const auto ownership = GameManager::Instance().GetDlcOwnership(binding->dlc_key);
+    if (ownership != DlcOwnership::Owned) return ownership;
 
     auto* itemTable = SDK::UPBDataTableManager::GetLoadedDataTable(SDK::EPBDataTables::ItemMaster);
-    if (!itemTable) return PaidDlcItemPreparation::NotReady;
-    const auto expectedCategory = itemId == "SwordWhip" ? SDK::ECarriedCatalog::Weapon
-                                                        : SDK::ECarriedCatalog::TriggerShard;
+    if (!itemTable) return DlcOwnership::NotReady;
+    const auto expectedCategory = NativeCategory(binding->category);
+    const auto expectedItemId = FNameFromString(itemId);
     for (const auto& pair : itemTable->RowMap) {
-        if (pair.Key().ToString() != itemId) continue;
+        // FName identity is case-insensitive, while ToString() preserves whichever spelling was registered
+        if (pair.Key() != expectedItemId) continue;
         auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
-        if (!row) return PaidDlcItemPreparation::NotReady;
+        if (!row) return DlcOwnership::NotReady;
         if (row->ItemType == SDK::ECarriedCatalog::None) {
-            // Schema-1's base/free static pak disables IGA's paid inventory rows. An early schema-1 APWorld
-            // accidentally admitted IGA items anyway. Restore the native category only for an owner of the
-            // matching DLC so those already-generated multiworlds can deliver their published items safely.
+            // The static pak intentionally disables paid inventory rows. Restore the native category only for
+            // an owner of the matching DLC; the game supplies the corresponding models, icons, and behavior.
             row->ItemType = expectedCategory;
-            Logger::Log(LogLevel::File, "[AP] Restored owned IGA ItemMaster category for legacy delivery:", itemId);
+            Logger::Log(LogLevel::File, "[AP] Restored owned paid-DLC ItemMaster category:", itemId,
+                        "DLC:", binding->dlc_key);
         }
-        return row->ItemType == expectedCategory ? PaidDlcItemPreparation::Ready
-                                                 : PaidDlcItemPreparation::NotReady;
+        return row->ItemType == expectedCategory ? DlcOwnership::Owned : DlcOwnership::NotReady;
     }
-    return PaidDlcItemPreparation::NotReady;
+    return DlcOwnership::NotReady;
 }
 
 void RecoverArchipelagoPlaceholderShards() {
@@ -114,6 +171,149 @@ bool GameManager::IsPlayerLoadedInGame() {
     // the early readiness check to raw UObject state.
     if (!player || !player->Class) return false;
     return true;
+}
+
+DlcOwnership GameManager::GetDlcOwnership(std::string_view dlcKey) const {
+    auto* dlcManager = SDK::UPBDLCManager::GetInstance();
+    if (!dlcManager || !dlcManager->HasFinishedFindAllDLCs()) return DlcOwnership::NotReady;
+    return dlcManager->HasDLC(FNameFromString(std::string(dlcKey)))
+               ? DlcOwnership::Owned
+               : DlcOwnership::NotOwned;
+}
+
+DlcOwnership GameManager::GetPaidDlcItemOwnership(std::string_view nativeItemId) const {
+    const auto* binding = FindPaidDlcItem(nativeItemId);
+    return binding ? GetDlcOwnership(binding->dlc_key) : DlcOwnership::NotApplicable;
+}
+
+bool GameManager::IsPaidDlcShard(std::string_view nativeItemId) const {
+    const auto* binding = FindPaidDlcItem(nativeItemId);
+    return binding && binding->is_shard;
+}
+
+bool GameManager::PrimeOwnedPaidDlcCatalogRows() {
+    if (suppressRandomizedDlcCatalogForNewGame_) return false;
+    if (paidDlcCatalogPrimed_) return true;
+
+    auto* itemTable = SDK::UPBDataTableManager::GetLoadedDataTable(SDK::EPBDataTables::ItemMaster);
+    if (!itemTable) return false;
+
+    int restoredRows = 0;
+    int unresolvedRows = 0;
+    std::string firstUnresolvedRow;
+    for (const auto& binding : bloodstained::tracker::generated::PAID_DLC_ITEM_BINDINGS) {
+        const auto ownership = GetDlcOwnership(binding.dlc_key);
+        if (ownership == DlcOwnership::NotReady) return false;
+        if (ownership != DlcOwnership::Owned) continue;
+
+        const auto expectedCategory = NativeCategory(binding.category);
+        const auto expectedItemId = FNameFromString(std::string(binding.native_name));
+        bool found = false;
+        for (const auto& pair : itemTable->RowMap) {
+            if (pair.Key() != expectedItemId) continue;
+            found = true;
+            auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
+            if (!row) {
+                unresolvedRows++;
+                if (firstUnresolvedRow.empty()) firstUnresolvedRow = std::string(binding.native_name);
+                break;
+            }
+            if (row->ItemType != expectedCategory) {
+                // Story inventory regeneration consults ItemMaster while loading. Restore every owned row at
+                // the title screen so native DLC inventory survives that regeneration, not just future AP grants.
+                row->ItemType = expectedCategory;
+                restoredRows++;
+            }
+            break;
+        }
+        if (!found) {
+            unresolvedRows++;
+            if (firstUnresolvedRow.empty()) firstUnresolvedRow = std::string(binding.native_name);
+        }
+    }
+
+    if (unresolvedRows == 0) {
+        paidDlcCatalogPrimed_ = true;
+        Logger::Log(LogLevel::File, "[AP] Primed owned paid-DLC ItemMaster rows before story load; restored:",
+                    restoredRows);
+    } else if (!paidDlcCatalogPendingLogged_) {
+        // DLC packages may finish contributing their rows over multiple title ticks. Keep retrying, but do not
+        // let one late row prevent already available rows in later packs from being restored or recovered.
+        paidDlcCatalogPendingLogged_ = true;
+        Logger::Log(LogLevel::File, "[AP] Paid-DLC ItemMaster priming remains partial; unresolved rows:",
+                    unresolvedRows, "first:", firstUnresolvedRow, "restored this pass:", restoredRows);
+    }
+    return true;
+}
+
+void GameManager::SuppressRandomizedDlcCatalogRowsForNewGame() {
+    suppressRandomizedDlcCatalogForNewGame_ = true;
+    paidDlcCatalogPrimed_ = false;
+    paidDlcCatalogPendingLogged_ = false;
+
+    auto* itemTable = SDK::UPBDataTableManager::GetLoadedDataTable(SDK::EPBDataTables::ItemMaster);
+    if (!itemTable) {
+        Logger::Log(LogLevel::Error,
+                    "[AP] Could not suppress randomized DLC starter items because ItemMaster is unavailable");
+        return;
+    }
+
+    int suppressedRows = 0;
+    for (const auto& binding : bloodstained::tracker::generated::PAID_DLC_ITEM_BINDINGS) {
+        const auto expectedItemId = FNameFromString(std::string(binding.native_name));
+        for (const auto& pair : itemTable->RowMap) {
+            if (pair.Key() != expectedItemId) continue;
+            auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
+            if (row && row->ItemType != SDK::ECarriedCatalog::None) {
+                row->ItemType = SDK::ECarriedCatalog::None;
+                suppressedRows++;
+            }
+            break;
+        }
+    }
+
+    for (const auto& binding : FREE_UPDATE_ITEM_BINDINGS) {
+        const auto expectedItemId = FNameFromString(std::string(binding.nativeName));
+        for (const auto& pair : itemTable->RowMap) {
+            if (pair.Key() != expectedItemId) continue;
+            auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
+            if (row && row->ItemType != SDK::ECarriedCatalog::None) {
+                row->ItemType = SDK::ECarriedCatalog::None;
+                suppressedRows++;
+            }
+            break;
+        }
+    }
+
+    Logger::Log(LogLevel::File,
+                "[AP] Suppressed vanilla randomized-DLC starter grants for new save; disabled rows:",
+                suppressedRows);
+}
+
+void GameManager::RestoreRandomizedDlcCatalogRowsAfterNewGameInit() {
+    if (!suppressRandomizedDlcCatalogForNewGame_) return;
+    suppressRandomizedDlcCatalogForNewGame_ = false;
+
+    auto* itemTable = SDK::UPBDataTableManager::GetLoadedDataTable(SDK::EPBDataTables::ItemMaster);
+    int restoredFreeRows = 0;
+    if (itemTable) {
+        for (const auto& binding : FREE_UPDATE_ITEM_BINDINGS) {
+            const auto expectedItemId = FNameFromString(std::string(binding.nativeName));
+            for (const auto& pair : itemTable->RowMap) {
+                if (pair.Key() != expectedItemId) continue;
+                auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
+                if (row && row->ItemType == SDK::ECarriedCatalog::None) {
+                    row->ItemType = binding.category;
+                    restoredFreeRows++;
+                }
+                break;
+            }
+        }
+    }
+    Logger::Log(LogLevel::File,
+                "[AP] Restored free-update ItemMaster rows after new-save initialization:",
+                restoredFreeRows);
+    PrimeOwnedPaidDlcCatalogRows();
 }
 
 bool GameManager::PopulateDisplayToItemIdTable() {
@@ -197,7 +397,12 @@ bool GameManager::PostInit() {
     Logger::Log("Populated Display Table");
     Sleep(200);
     ThreadQueue::Instance().Enqueue([this] {
+        // A brand-new story reaches this path without OnLoadGameCompletely. Its
+        // vanilla starter grant pass is over, so re-enable the temporarily
+        // suppressed rows before the first AP delivery can be processed.
+        RestoreRandomizedDlcCatalogRowsAfterNewGameInit();
         RecoverArchipelagoPlaceholderShards();
+        GameManager::Instance().ApplyWaystoneSafety();
         GameManager::Instance().PopulateDisplayToItemIdTable();
     });
     // GameManager::Instance().PopulateDisplayToItemIdTable();
@@ -353,6 +558,74 @@ std::optional<SDK::FPBItemCatalogData> GameManager::CheckAllInventories(const st
     return std::nullopt;
 }
 
+void GameManager::ApplyWaystoneSafety() {
+    bool shopPolicyChanged = false;
+    if (auto* itemTable = SDK::UPBDataTableManager::GetLoadedDataTable(SDK::EPBDataTables::ItemMaster)) {
+        for (const auto& pair : itemTable->RowMap) {
+            if (pair.Key().ToString() != WAYSTONE_ITEM_ID) continue;
+            auto* row = reinterpret_cast<SDK::FPBItemMasterData*>(pair.Value());
+            if (!row) break;
+            shopPolicyChanged = row->buyPrice != 0 || row->sellPrice != 0 ||
+                                row->Producted.ToString() != "None";
+            if (shopPolicyChanged) {
+                row->buyPrice = 0;
+                row->sellPrice = 0;
+                row->Producted = FNameFromString("None");
+            }
+            break;
+        }
+    }
+
+    auto* player = static_cast<SDK::APB_Chr_Root_C*>(Player());
+    if (!player || !player->CharacterInventory) return;
+
+    auto* inventory = player->CharacterInventory;
+    bool inventoryPolicyChanged = false;
+    auto normalizeWaystone = [&]() {
+        for (auto& item : inventory->myConsumables) {
+            if (item.ID.ToString() != WAYSTONE_ITEM_ID) continue;
+            const bool needsNormalization = item.Num != WAYSTONE_QUANTITY || item.buyPrice != 0 ||
+                                            item.sellPrice != 0 || item.ProductFlag.ToString() != "None";
+            inventoryPolicyChanged = inventoryPolicyChanged || needsNormalization;
+            if (needsNormalization) {
+                item.Num = WAYSTONE_QUANTITY;
+                item.buyPrice = 0;
+                item.sellPrice = 0;
+                item.ProductFlag = FNameFromString("None");
+            }
+            return true;
+        }
+        return false;
+    };
+
+    bool waystoneFound = normalizeWaystone();
+    bool nativeGrantAccepted = false;
+    if (!waystoneFound) {
+        // A fresh save does not materialize zero-count consumables in myConsumables. Create the entry through the
+        // native inventory path without displaying a pickup, then normalize its quantity and shop metadata.
+        nativeGrantAccepted = inventory->GetItemWithDisplay(
+            FNameFromString(std::string(WAYSTONE_ITEM_ID)), WAYSTONE_QUANTITY, false);
+        waystoneFound = normalizeWaystone();
+        inventoryPolicyChanged = inventoryPolicyChanged || waystoneFound;
+    }
+
+    if (!waystoneFound) {
+        Logger::Log(LogLevel::File, "[AP] Could not create infinite Waystones; native grant accepted:",
+                    nativeGrantAccepted);
+    } else if (shopPolicyChanged || inventoryPolicyChanged) {
+        Logger::Log(LogLevel::File, "[AP] Applied infinite Waystones; quantity:", WAYSTONE_QUANTITY,
+                    "buying and selling disabled");
+    }
+}
+
+bool GameManager::TryUseWaystone() {
+    auto* player = static_cast<SDK::APB_Chr_Root_C*>(Player());
+    if (!player || !player->CharacterInventory || player->Killed) return false;
+
+    ApplyWaystoneSafety();
+    return player->CharacterInventory->UseConsumable(FNameFromString(std::string(WAYSTONE_ITEM_ID)), false);
+}
+
 bool GameManager::UnlockEquipmentInShop(const std::string& itemName) {
     auto* player = static_cast<SDK::APB_Chr_Root_C*>(Player());
     if (!player || !player->CharacterInventory) return false;
@@ -425,27 +698,38 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
 
         auto* inventory = gameManager.Player()->CharacterInventory;
         auto itemName = FNameFromString(name);
-        if (name == "SwordWhip" || name == "NeverSatisfied") {
-            const auto preparation = PrepareOwnedIgaCatalogRow(name);
-            if (preparation != PaidDlcItemPreparation::Ready) {
-                // Old or already-generated multiworlds can still contain IGA's paid-DLC items. A missing
-                // entitlement is permanent and must not block later deliveries; unavailable native state is
-                // transient and remains retryable.
-                if (completion) {
-                    completion(preparation == PaidDlcItemPreparation::NotOwned ? ItemGrantResult::Unsupported
-                                                                              : ItemGrantResult::Rejected);
-                }
-                return;
+        const auto preparation = PreparePaidDlcCatalogRow(name);
+        if (preparation != DlcOwnership::NotApplicable && preparation != DlcOwnership::Owned) {
+            // Missing entitlement is permanent and must not block later deliveries; unavailable native state is
+            // transient and remains retryable.
+            if (preparation == DlcOwnership::NotOwned) {
+                Logger::Log(LogLevel::File, "[AP] Paid-DLC item is unsupported by this installation:", name);
             }
+            if (completion) {
+                completion(preparation == DlcOwnership::NotOwned ? ItemGrantResult::Unsupported
+                                                                : ItemGrantResult::Rejected);
+            }
+            return;
         }
         SDK::FPBItemCatalogData itemData{};
         inventory->GetItemDataById(itemName, &itemData);
 
         auto itemInInventory = gameManager.CheckAllInventories(name);
         const int previousCount = itemInInventory ? itemInInventory->Num : 0;
+        const bool isShard = gameManager.IsPaidDlcShard(name) || IsShardCategory(itemData.itemCategory);
+        const int previousGrade = isShard ? inventory->GetShardGradeWithPossession(itemName) : 0;
+        constexpr int MAX_SHARD_GRADE = 9;
+        if (isShard && previousGrade >= MAX_SHARD_GRADE) {
+            auto iconId = inventory->GetItemIcon(itemName);
+            gameManager.SendInGameNotification("Limit reached: " + itemData.Name.ToString(), iconId);
+            Logger::Log(LogLevel::File, "[AP] Received shard already at native grade capacity:", name,
+                        "grade:", previousGrade);
+            if (completion) completion(ItemGrantResult::AtCapacity);
+            return;
+        }
         if (itemInInventory.has_value()) {
             Logger::Log("Player has", itemInInventory->Num, "of", name);
-            if (itemInInventory->Num >= itemInInventory->MaxNum) {
+            if (!isShard && itemInInventory->Num >= itemInInventory->MaxNum) {
                 auto iconId = inventory->GetItemIcon(itemInInventory->ID);
                 gameManager.SendInGameNotification("Limit reached: " + itemData.Name.ToString(), iconId);
                 if (completion) completion(ItemGrantResult::AtCapacity);
@@ -455,7 +739,9 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
 
         bool nativeGrantAccepted = inventory->GetItemWithDisplay(itemName, count, shouldDisplay);
         auto itemAfterGrant = gameManager.CheckAllInventories(name);
-        bool inventoryUpdated = itemAfterGrant && itemAfterGrant->Num > previousCount;
+        const int currentGrade = isShard ? inventory->GetShardGradeWithPossession(itemName) : 0;
+        bool inventoryUpdated = isShard ? currentGrade > previousGrade
+                                        : itemAfterGrant && itemAfterGrant->Num > previousCount;
 
         // Some special equipment (notably the IGA DLC Sword Whip) is present in ItemMaster and has a valid
         // protocol mapping, but rejects the ordinary display-grant route. Native pickups for those rows use
@@ -472,7 +758,8 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
         if (nativeGrantAccepted && !inventoryUpdated) {
             Logger::Log(LogLevel::File, "[AP] Native item grant reported success without updating inventory:",
                         name, "previous count:", previousCount,
-                        "current count:", itemAfterGrant ? itemAfterGrant->Num : 0);
+                        "current count:", itemAfterGrant ? itemAfterGrant->Num : 0,
+                        "previous grade:", previousGrade, "current grade:", currentGrade);
         }
         if (nativeGrantAccepted && inventoryUpdated && gameManager.UnlockEquipmentInShop(name)) {
             Logger::Log(LogLevel::File, "[AP] Unlocked received equipment in shop:", name);
@@ -484,22 +771,21 @@ void GameManager::GivePlayerItem(const std::string& name, bool shouldDisplay, in
 }
 
 bool GameManager::CanKillPlayer() {
-    auto instance = (SDK::UPBGameInstance*)(GameInstance());
-    auto player = (SDK::APB_Chr_PlayerRoot_C*)(Player());
-    auto controller = (SDK::APBPlayerController*)(PlayerController());
-    auto hud = controller->MyHUD;
-    ThreadQueue::Instance().Enqueue([this, instance, player, hud]() {
-        auto gamemodeType = instance->GetGameModeType();
-        if (gamemodeType == SDK::EPBGameModeType::Normal || gamemodeType == SDK::EPBGameModeType::RandomizerMode ||
-            gamemodeType == SDK::EPBGameModeType::SpeedRunMode)
-            return false;
-        if (!SDK::UKismetSystemLibrary::IsValid(instance->LoadingManagerInstance)) return false;
-        if (instance->LoadingManagerInstance->IsLoadingScreenVisible()) return false;
-        if (!IsPlayerLoadedInGame()) return false;
-        if (player->Killed) return false;
-        if (player->CurrentryWarpingByWarpRoom) return false;
-        if (!SDK::UKismetSystemLibrary::IsValid(hud)) return false;
-    });
+    auto* instance = static_cast<SDK::UPBGameInstance*>(GameInstance());
+    auto* player = static_cast<SDK::APB_Chr_PlayerRoot_C*>(Player());
+    auto* controller = static_cast<SDK::APBPlayerController*>(PlayerController());
+    if (!instance || !player || !controller) return false;
+
+    const auto gameModeType = instance->GetGameModeType();
+    if (gameModeType != SDK::EPBGameModeType::Normal &&
+        gameModeType != SDK::EPBGameModeType::RandomizerMode &&
+        gameModeType != SDK::EPBGameModeType::SpeedRunMode) {
+        return false;
+    }
+    if (!SDK::UKismetSystemLibrary::IsValid(instance->LoadingManagerInstance)) return false;
+    if (instance->LoadingManagerInstance->IsLoadingScreenVisible()) return false;
+    if (!IsPlayerLoadedInGame() || player->Killed || player->CurrentryWarpingByWarpRoom) return false;
+    if (!SDK::UKismetSystemLibrary::IsValid(controller->MyHUD)) return false;
     return true;
 }
 

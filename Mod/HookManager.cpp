@@ -9,6 +9,8 @@
 #include <Step_P0000_classes.hpp>
 #include <UMG_classes.hpp>
 #include <UnrealContainers.hpp>
+#include <PBBronzeTreasureBox_BP_classes.hpp>
+#include <array>
 #include <optional>
 
 #include "Basic.hpp"
@@ -31,12 +33,25 @@ std::set<std::string> HookManager::processedWidgets;
 
 void (*HookManager::originalProcessEvent)(SDK::UObject*, SDK::UFunction*, void*) = nullptr;
 void (*HookManager::originalProcessLocalScriptFunction)(SDK::UObject*, SDK::UFunction*, void*) = nullptr;
+HookManager::UseConsumableNative HookManager::originalUseConsumable = nullptr;
+HookManager::RoomTransitionNative HookManager::originalRoomTransition = nullptr;
+bool HookManager::pendingPreTownWaystone = false;
 bool HookManager::playerDetected = false;
 bool HookManager::shuttingDown = false;
 
 static std::unordered_map<std::string, SDK::EDropSpecialFlag> originalRandomizedDropFlags;
 
 namespace {
+
+constexpr std::string_view TOWN_WAYSTONE_ROOM = "m02VIL_003";
+constexpr std::string_view GAME_START_ROOM = "m01SIP_000";
+constexpr std::string_view WAYSTONE_ITEM_ID = "Waystone";
+// Shared native implementations. The reflected entry points are only wrappers, while native
+// callers such as the WayStone special effect call these routines directly.
+constexpr SDK::int32 USE_CONSUMABLE_NATIVE = 0x06FF1980;
+constexpr SDK::int32 ROOM_TRANSITION_NATIVE = 0x0707E270;
+constexpr std::string_view FAMILIA_ARCHER_LOCATION_ID = "AP_FamiliaArcher_Shard";
+bool pendingBreederFamiliarArcherReward = false;
 
 const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     // Generated from the unmodified base-game PB_DT_DropRateMaster in pakchunk0.
@@ -54,6 +69,7 @@ const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     {"AP_N2007_Shard", "Shadowtracer"},
     {"AP_N2012_Shard", "AccelWorld"},
     {"AP_N2013_Shard", "NeverSatisfied"},
+    {"AP_N2017_Shard", "TissRosain"},
     {"AP_N1004_Shard", "GoldBarrett"},
     {"AP_N1005_Shard", "InfernoBrace"},
     {"AP_N3006_Shard", "Ceruleansplash"},
@@ -161,6 +177,8 @@ const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     {"AP_N3088_Shard", "SummonTracer"},
     {"AP_N3018_Shard", "GunMastery"},
     {"AP_N3120_Shard", "AxStrike"},
+    {"AP_N3126_Shard", "Headfail"},
+    {"AP_N3127_Shard", "Headfail"},
     {"AP_N3057_Shard", "FoldShiu"},
     {"AP_N3106_Shard", "Chiselbalage"},
     {"AP_N3107_Shard", "RuinBeak"},
@@ -179,6 +197,20 @@ const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
 // of these checks remain compatible.
 const std::unordered_set<std::string> suppressedNonLocationShardIds = {
     "AP_FamiliaSilverKnight_Shard",
+};
+
+// Journey's Giant Dullahammer Head and Dullahammer EX reuse early-game drop rows in the cooked data. Archipelago
+// exposes them as independent locations, so split the shared source ID using the dying enemy's class before the
+// shard actor is created.
+struct SharedShardLocation {
+    const char* characterClass;
+    const char* sharedDropShardId;
+    const char* locationShardId;
+};
+
+constexpr std::array sharedShardLocations = {
+    SharedShardLocation{"Chr_N3126_C", "AP_N3090_Shard", "AP_N3126_Shard"},
+    SharedShardLocation{"Chr_N3127_C", "AP_N3015_Shard", "AP_N3127_Shard"},
 };
 
 bool IsSuppressedNonLocationShard(const std::string& shardId) {
@@ -359,6 +391,24 @@ void HookManager::ApplyShardDropPolicy() {
         }
     }
 
+    // The dedicated split IDs do not have their own cooked drop rows. Unsuppress the shared source rows whenever
+    // either split location exists so a grade-9 copy of the ordinary shard cannot suppress the AP check.
+    if (dropManager && dropManager->DropTable) {
+        for (const auto& sharedLocation : sharedShardLocations) {
+            const auto isShuffledLocation = archipelago->IsCurrentWorldLocation(sharedLocation.locationShardId);
+            if (!isShuffledLocation || !*isShuffledLocation) continue;
+
+            const std::string sourceRowName = std::string(sharedLocation.sharedDropShardId).substr(3);
+            auto* dropRow = FindDropMasterRow(dropManager->DropTable, sourceRowName);
+            if (!dropRow) continue;
+            if (!originalRandomizedDropFlags.contains(sourceRowName)) {
+                originalRandomizedDropFlags[sourceRowName] = dropRow->DropSpecialFlags;
+                unsuppressedDropRows++;
+            }
+            dropRow->DropSpecialFlags = SDK::EDropSpecialFlag::None;
+        }
+    }
+
     Logger::Log(LogLevel::File, "[Shard] Applied current shard drop policy; shuffled location rows:",
                 shuffledDropRows, "unsuppressed drop rows:", unsuppressedDropRows,
                 "auto-sell repeats:", autoSellRepeatedShards);
@@ -370,6 +420,8 @@ bool HookManager::Init() {
     constexpr SDK::int32 ProcessLocalScriptFunction = 0x0674B520;
     void* processEventPtr = (void*)(SDK::InSDKUtils::GetImageBase() + SDK::Offsets::ProcessEvent);
     void* processLocalScriptFunctionPtr = (void*)(SDK::InSDKUtils::GetImageBase() + ProcessLocalScriptFunction);
+    void* useConsumablePtr = (void*)(SDK::InSDKUtils::GetImageBase() + USE_CONSUMABLE_NATIVE);
+    void* roomTransitionPtr = (void*)(SDK::InSDKUtils::GetImageBase() + ROOM_TRANSITION_NATIVE);
     if (!processEventPtr) {
         Logger::Log(LogLevel::Error, "Failed to get ProcessEvent address");
         return false;
@@ -382,12 +434,24 @@ bool HookManager::Init() {
     MH_STATUS peStatus = MH_CreateHook(processEventPtr, &HOOKED_ProcessEvent, (void**)&originalProcessEvent);
     MH_STATUS plsfStatus = MH_CreateHook(processLocalScriptFunctionPtr, &HOOKED_ProcessLocalScriptFunction,
                                          (void**)&originalProcessLocalScriptFunction);
+    MH_STATUS useConsumableStatus =
+        MH_CreateHook(useConsumablePtr, &HOOKED_UseConsumable, (void**)&originalUseConsumable);
+    MH_STATUS roomTransitionStatus =
+        MH_CreateHook(roomTransitionPtr, &HOOKED_RoomTransition, (void**)&originalRoomTransition);
     if (peStatus != MH_OK) {
         Logger::Log(LogLevel::Error, "pe MH_CreateHook failed: ", (int)peStatus);
         return false;
     }
     if (plsfStatus != MH_OK) {
         Logger::Log(LogLevel::Error, "plsf MH_CreateHook failed: ", (int)plsfStatus);
+        return false;
+    }
+    if (useConsumableStatus != MH_OK) {
+        Logger::Log(LogLevel::Error, "UseConsumable MH_CreateHook failed: ", (int)useConsumableStatus);
+        return false;
+    }
+    if (roomTransitionStatus != MH_OK) {
+        Logger::Log(LogLevel::Error, "RoomTransition MH_CreateHook failed: ", (int)roomTransitionStatus);
         return false;
     }
 
@@ -401,13 +465,25 @@ bool HookManager::Init() {
         Logger::Log(LogLevel::Error, "plsf MH_EnableHook failed: ", (int)plsfStatus);
         return false;
     }
+    useConsumableStatus = MH_EnableHook(useConsumablePtr);
+    if (useConsumableStatus != MH_OK) {
+        Logger::Log(LogLevel::Error, "UseConsumable MH_EnableHook failed: ", (int)useConsumableStatus);
+        return false;
+    }
+    roomTransitionStatus = MH_EnableHook(roomTransitionPtr);
+    if (roomTransitionStatus != MH_OK) {
+        Logger::Log(LogLevel::Error, "RoomTransition MH_EnableHook failed: ", (int)roomTransitionStatus);
+        return false;
+    }
 
     // When game and player completely load in
     NotifyOnClassFunction("PBGameMode_Miriam_BP_C", "OnLoadGameCompletely", [](void* obj) {
         // The title world and its widgets have already been destroyed by this point.
         // Drop our stale references without invoking a method on the dead widget.
         MainMenuStatus::Instance().Forget();
+        GameManager::Instance().RestoreRandomizedDlcCatalogRowsAfterNewGameInit();
         GameManager::Instance().PlayerAlive();
+        ThreadQueue::Instance().Enqueue([] { GameManager::Instance().ApplyWaystoneSafety(); });
         InGameTracker::Instance().LoadDisplayMode();
         QualityOfLife::Instance().LoadSettings();
         QualityOfLife::Instance().AcceptAvailableBountyHunts();
@@ -419,11 +495,39 @@ bool HookManager::Init() {
         Logger::Log("Player respawned");
     });
 
-    NotifyOnClassFunction("TitleMainMenu_C", "Tick",
-                          [](void* obj) { MainMenuStatus::Instance().Show(static_cast<SDK::UObject*>(obj)); });
+    NotifyOnClassFunction("TitleMainMenu_C", "Tick", [](void* obj) {
+        GameManager::Instance().PrimeOwnedPaidDlcCatalogRows();
+        MainMenuStatus::Instance().Show(static_cast<SDK::UObject*>(obj));
+    });
 
     Logger::Log("HookManager initialized successfully");
     return true;
+}
+
+bool HookManager::HOOKED_UseConsumable(SDK::UPBCharacterInventoryComponent* inventory, SDK::FName itemId,
+                                       bool noRemove, bool byFamilia) {
+    auto* gameInstance = static_cast<SDK::UPBGameInstance*>(GameManager::Instance().GameInstance());
+    auto* mapManager = gameInstance ? gameInstance->pMapManager : nullptr;
+    const auto townRoom = FNameFromString(std::string(TOWN_WAYSTONE_ROOM));
+    const bool armRedirect = itemId.ToString() == WAYSTONE_ITEM_ID && mapManager &&
+                             !mapManager->IsRoomAcknowledged(townRoom);
+    if (armRedirect) pendingPreTownWaystone = true;
+
+    const bool used = originalUseConsumable(inventory, itemId, noRemove, byFamilia);
+    if (armRedirect && !used) pendingPreTownWaystone = false;
+    return used;
+}
+
+bool HookManager::HOOKED_RoomTransition(SDK::UPBRoomManager* roomManager, SDK::FName roomId,
+                                        bool transitionFlag, SDK::FName preferredSpawnPointName,
+                                        const SDK::FLinearColor* fadeColor) {
+    if (pendingPreTownWaystone && roomId.ToString() == TOWN_WAYSTONE_ROOM) {
+        pendingPreTownWaystone = false;
+        roomId = FNameFromString(std::string(GAME_START_ROOM));
+        preferredSpawnPointName = FNameFromString("None");
+        Logger::Log(LogLevel::File, "[AP] Redirected pre-town Waystone to game start room");
+    }
+    return originalRoomTransition(roomManager, roomId, transitionFlag, preferredSpawnPointName, fadeColor);
 }
 
 bool HookManager::PostInit() {
@@ -498,32 +602,44 @@ bool HookManager::PostInit() {
 
     // Whens constantly when the player is alive
     NotifyOnClassFunction("Chr_P0000_C", "GetAdditionalCameraTargetLocations", [](void* obj) {
-        if (!Archipelago::ConnectedInstance()) return;
-        if (!Archipelago::ConnectedInstance()->IsPendingDeathlink()) return;
+        // Quantity is per-save inventory state rather than an ItemMaster default. Reassert it continuously so
+        // every native and Blueprint Waystone-use path observes the same infinite-five invariant.
+        GameManager::Instance().ApplyWaystoneSafety();
+        QualityOfLife::Instance().TickAutoAcceptBountyHunts();
+        auto* archipelago = Archipelago::ConnectedInstance();
+        if (!archipelago || !archipelago->IsPendingDeathlink()) return;
 
-        Logger::Log("Pending death link is true");
-        // is pending death link is true
-        if (GameManager::Instance().CanKillPlayer() && !GameManager::Instance().IsPlayerDead()) {
-            Logger::Log("Killing player from deathlink");
-            GameManager::Instance().KillPlayer();
-            Logger::Log("Killed player");
+        switch (archipelago->GetDeathLinkMode()) {
+            case DeathLinkMode::Off:
+                archipelago->ResetDeathLink();
+                break;
+            case DeathLinkMode::Waystone:
+                if (!GameManager::Instance().IsPlayerDead() && GameManager::Instance().CanKillPlayer() &&
+                    GameManager::Instance().TryUseWaystone()) {
+                    archipelago->ResetDeathLink();
+                    Logger::Log(LogLevel::File, "[AP] Applied DeathLink consequence: Waystone");
+                }
+                break;
+            case DeathLinkMode::GameOver:
+                if (GameManager::Instance().CanKillPlayer() && !GameManager::Instance().IsPlayerDead()) {
+                    Logger::Log(LogLevel::File, "[AP] Applying DeathLink consequence: Game Over");
+                    GameManager::Instance().KillPlayer();
+                }
+                break;
         }
     });
 
     // When player dies
     NotifyOnClassFunction("Chr_P0000_C", "Kill", [](void* obj) {
-        Logger::Log("Player died");
         GameManager::Instance().PlayerDied();
-        Logger::Log("Pending death link", Archipelago::ConnectedInstance()->IsPendingDeathlink());
-        // pending death is true
-        if (!Archipelago::ConnectedInstance()->IsPendingDeathlink()) {
-            Logger::Log("Sent out death link");
-            Archipelago::ConnectedInstance()->InvokeDeathLink();  // send out death link
+        auto* archipelago = Archipelago::ConnectedInstance();
+        if (!archipelago) return;
+
+        if (!archipelago->IsPendingDeathlink()) {
+            archipelago->InvokeDeathLink();
         } else {
-            Archipelago::ConnectedInstance()->ResetDeathLink();
-            Logger::Log("Resetting death link");
+            archipelago->ResetDeathLink();
         }
-        Logger::Log("End of player died");
     });
 
     // When player returns to title screen
@@ -626,12 +742,40 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
     QualityOfLife::Instance().ProcessEventBefore(obj, func, params);
     std::string functionName = func->Name.GetRawString();
 
+    // Breeder's shard is a scripted direct inventory grant rather than a PurpleShard actor. Arm the remap only
+    // for this boss death so receiving Familiar: Archer as an AP item while visiting Dead Lands remains untouched.
+    if (functionName == "BP_OnKilled" && obj->Class->Name.ToString() == "Chr_N2016_C") {
+        const auto isShuffledLocation =
+            Archipelago::Instance().IsCurrentWorldLocation(std::string(FAMILIA_ARCHER_LOCATION_ID));
+        pendingBreederFamiliarArcherReward = isShuffledLocation.value_or(false);
+    }
+
+    if (functionName == "OpenTreasureBox" &&
+        obj->IsA(SDK::APBBronzeTreasureBox_BP_C::StaticClass())) {
+        InGameTracker::Instance().AuditOpenedChestPosition(obj);
+    }
+
+    // The static pak disables paid-DLC ItemMaster rows so vanilla cannot grant
+    // cosmetic-pack starter equipment. Existing saves need those rows restored
+    // before inventory regeneration, but a newly confirmed save must put them
+    // back before its initial vanilla grant pass begins.
+    if (functionName == "EntryNameConfirmYes" && obj->Class &&
+        obj->Class->Name.ToString() == "EntryNameSetter_C") {
+        GameManager::Instance().SuppressRandomizedDlcCatalogRowsForNewGame();
+    }
+
     // Location placeholders must remain in the vanilla inventory so the native pickup remains durable, but their
     // internal AP_* names are implementation details and must never produce a player-facing item popup. The
     // post-event callback journals the successful grant directly, so suppressing display cannot lose the check.
     if (params && functionName == "GetItemWithDisplay" &&
         obj->Class->Name.ToString() == "PBCharacterInventoryComponent") {
         auto* itemParams = static_cast<SDK::Params::PBCharacterInventoryComponent_GetItemWithDisplay*>(params);
+        if (pendingBreederFamiliarArcherReward && itemParams->newItemId.ToString() == "FamiliaArcher") {
+            itemParams->newItemId = FNameFromString(std::string(FAMILIA_ARCHER_LOCATION_ID));
+            pendingBreederFamiliarArcherReward = false;
+            Logger::Log(LogLevel::File,
+                        "[Shard] Remapped Breeder's scripted Familiar: Archer reward to AP location");
+        }
         if (itemParams->newItemId.ToString().starts_with("AP_")) itemParams->isDisplay = false;
     }
 
@@ -664,6 +808,21 @@ void HookManager::ProcessEventBefore(SDK::UObject* obj, SDK::UFunction* func, vo
     auto* crystallizeParams = static_cast<SDK::Params::PBBaseCharacter_CrystallizeDead*>(params);
     std::string shardName = crystallizeParams->DropShardId.ToString();
     auto* archipelago = &Archipelago::Instance();
+
+    const std::string characterClass = obj->Class ? obj->Class->Name.ToString() : "";
+    for (const auto& sharedLocation : sharedShardLocations) {
+        if (characterClass != sharedLocation.characterClass) continue;
+
+        const auto isSplitLocation = archipelago->IsCurrentWorldLocation(sharedLocation.locationShardId);
+        if (!isSplitLocation || !*isSplitLocation) break;
+
+        crystallizeParams->DropShardId = FNameFromString(sharedLocation.locationShardId);
+        Logger::Log(LogLevel::File, "[Shard] Remapped shared enemy shard location:", characterClass,
+                    "source:", shardName, "location:", sharedLocation.locationShardId);
+        shardName = sharedLocation.locationShardId;
+        break;
+    }
+
     if (!shardName.starts_with("AP_")) return;
 
     auto vanillaShardId = ResolveVanillaShardId(crystallizeParams->DropShardId);
