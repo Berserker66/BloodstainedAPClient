@@ -11,9 +11,7 @@ from pathlib import Path
 
 
 ASSETS = (
-    ("AP_ChestMarker", "chest-marker.png"),
     ("AP_WallMarker", "wall-marker.png"),
-    ("AP_ShardMarker", "shard-marker.png"),
 )
 
 

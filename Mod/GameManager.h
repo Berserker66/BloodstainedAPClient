@@ -72,6 +72,7 @@ class GameManager {
     DlcOwnership GetDlcOwnership(std::string_view dlcKey) const;
     DlcOwnership GetPaidDlcItemOwnership(std::string_view nativeItemId) const;
     bool IsPaidDlcShard(std::string_view nativeItemId) const;
+    bool IsRandomizedDlcItem(SDK::FName nativeItemId) const;
     bool PrimeOwnedPaidDlcCatalogRows();
     void SuppressRandomizedDlcCatalogRowsForNewGame();
     void RestoreRandomizedDlcCatalogRowsAfterNewGameInit();

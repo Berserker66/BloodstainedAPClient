@@ -191,6 +191,19 @@ bool GameManager::IsPaidDlcShard(std::string_view nativeItemId) const {
     return binding && binding->is_shard;
 }
 
+bool GameManager::IsRandomizedDlcItem(SDK::FName nativeItemId) const {
+    // Ownership controls AP delivery, not vanilla starter gifts. Every paid pack's
+    // randomized items must be excluded from the load-time grant-if-missing pass.
+    const auto& paidItems = bloodstained::tracker::generated::PAID_DLC_ITEM_BINDINGS;
+    if (std::any_of(paidItems.begin(), paidItems.end(), [nativeItemId](const auto& binding) {
+            return nativeItemId == FNameFromString(std::string(binding.native_name));
+        })) return true;
+    return std::any_of(FREE_UPDATE_ITEM_BINDINGS.begin(), FREE_UPDATE_ITEM_BINDINGS.end(),
+                       [nativeItemId](const auto& binding) {
+                           return nativeItemId == FNameFromString(std::string(binding.nativeName));
+                       });
+}
+
 bool GameManager::PrimeOwnedPaidDlcCatalogRows() {
     if (suppressRandomizedDlcCatalogForNewGame_) return false;
     if (paidDlcCatalogPrimed_) return true;

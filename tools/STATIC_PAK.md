@@ -4,7 +4,7 @@
 It starts from the clean, seed-independent True Randomizer-derived pak, overlays the
 current vanilla assets that Archipelago owns, applies every permanent cooked-asset
 patch through `static_pak_patcher`, removes seed-specific generated assets, and
-requires the resulting pak to contain 788 files.
+requires the resulting pak to contain 784 files.
 
 The patcher includes and validates:
 
@@ -14,8 +14,7 @@ The patcher includes and validates:
 - the client-controlled post-Den chest gate;
 - O.D.'s initial lending returns raised from 1/2 to 3, without changing the
   unlimited post-defeat branch.
-- cooked chest, wall, and shard marker textures owned by Unreal rather than
-  imported from native-client resources at runtime.
+- a cooked wall marker texture.
 
 Example from the workspace root:
 

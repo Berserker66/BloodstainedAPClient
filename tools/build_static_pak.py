@@ -31,15 +31,12 @@ REQUIRED_OUTPUTS = VANILLA_OVERLAYS + (
     "BloodstainedRotN/Content/Core/Environment/ACT01_SIP/Level/m01SIP_004_Gimmick.uexp",
     "BloodstainedRotN/Content/Core/Environment/ACT01_SIP/Level/m01SIP_025_Gimmick.umap",
     "BloodstainedRotN/Content/Core/Environment/ACT01_SIP/Level/m01SIP_025_Gimmick.uexp",
-    "BloodstainedRotN/Content/Archipelago/UI/AP_ChestMarker.uasset",
-    "BloodstainedRotN/Content/Archipelago/UI/AP_ChestMarker.uexp",
     "BloodstainedRotN/Content/Archipelago/UI/AP_WallMarker.uasset",
     "BloodstainedRotN/Content/Archipelago/UI/AP_WallMarker.uexp",
-    "BloodstainedRotN/Content/Archipelago/UI/AP_ShardMarker.uasset",
-    "BloodstainedRotN/Content/Archipelago/UI/AP_ShardMarker.uexp",
 )
 
 FORBIDDEN_GENERATED_STEMS = ("DifficultSelecter", "EntryNameSetter", "VersionNumber")
+RUNTIME_MARKER_STEMS = ("AP_ChestMarker", "AP_ShardMarker")
 
 
 def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -49,7 +46,7 @@ def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[byt
 
 def remove_seed_specific_assets(stage: Path) -> None:
     for path in stage.rglob("*"):
-        if path.is_file() and path.stem in FORBIDDEN_GENERATED_STEMS:
+        if path.is_file() and path.stem in FORBIDDEN_GENERATED_STEMS + RUNTIME_MARKER_STEMS:
             path.unlink()
 
 
@@ -128,8 +125,10 @@ def main() -> int:
         ])
         listing = run([str(args.repak), "list", str(temporary_output)],
                       capture_output=True, text=True).stdout.splitlines()
-        if len(listing) != 788:
-            raise RuntimeError(f"static pak contains {len(listing)} files, expected 788")
+        if any(Path(asset).stem in RUNTIME_MARKER_STEMS for asset in listing):
+            raise RuntimeError("static pak contains a runtime-generated chest or shard texture")
+        if len(listing) != 784:
+            raise RuntimeError(f"static pak contains {len(listing)} files, expected 784")
         shutil.copy2(temporary_output, args.output)
         print(f"built {args.output} ({len(listing)} files, sha256={sha256(args.output)})")
         return 0

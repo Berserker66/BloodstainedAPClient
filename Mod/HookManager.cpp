@@ -53,6 +53,68 @@ constexpr SDK::int32 ROOM_TRANSITION_NATIVE = 0x0707E270;
 constexpr std::string_view FAMILIA_ARCHER_LOCATION_ID = "AP_FamiliaArcher_Shard";
 bool pendingBreederFamiliarArcherReward = false;
 
+// The native story-load DLC pass calls these helpers directly: grant one item if absent,
+// or grant a family's base item if none of its levels is present. ProcessEvent cannot
+// intercept those calls. AP delivery uses GetItem/GetItemWrap and does not use either helper.
+using DlcMissingItemGrant = void (*)(SDK::UPBCharacterInventoryComponent*, SDK::FName);
+using DlcMissingFamilyGrant = void (*)(SDK::UPBCharacterInventoryComponent*, SDK::FName,
+                                     const SDK::TArray<SDK::FName>*);
+DlcMissingItemGrant originalDlcMissingItemGrant = nullptr;
+DlcMissingFamilyGrant originalDlcMissingFamilyGrant = nullptr;
+
+bool SuppressRandomizedDlcStarterItem(SDK::FName itemId) {
+    if (!GameManager::Instance().IsRandomizedDlcItem(itemId)) return false;
+    static std::set<std::string> loggedItems;
+    const auto name = itemId.ToString();
+    if (loggedItems.insert(name).second) {
+        Logger::Log(LogLevel::File, "[AP] Suppressed vanilla randomized-DLC missing-item grant:", name);
+    }
+    return true;
+}
+
+void HookDlcMissingItemGrant(SDK::UPBCharacterInventoryComponent* inventory, SDK::FName itemId) {
+    if (!SuppressRandomizedDlcStarterItem(itemId)) originalDlcMissingItemGrant(inventory, itemId);
+}
+
+void HookDlcMissingFamilyGrant(SDK::UPBCharacterInventoryComponent* inventory, SDK::FName itemId,
+                             const SDK::TArray<SDK::FName>* family) {
+    if (!SuppressRandomizedDlcStarterItem(itemId)) originalDlcMissingFamilyGrant(inventory, itemId, family);
+}
+
+bool InstallRandomizedDlcGrantHooks() {
+    auto* single = reinterpret_cast<unsigned char*>(SDK::InSDKUtils::GetImageBase() + 0x06FBC7E0);
+    auto* family = reinterpret_cast<unsigned char*>(SDK::InSDKUtils::GetImageBase() + 0x06FBC820);
+    // Validate both entry points before installing either hook. These are native, unreflected
+    // functions in the supported game executable, so a changed layout must not be hooked blindly.
+    constexpr std::array<unsigned char, 16> singlePrefix = {
+        0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83,
+        0xec, 0x20, 0x41, 0xb0, 0x1b, 0x48, 0x8b, 0xda};
+    constexpr std::array<unsigned char, 16> familyPrefix = {
+        0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c,
+        0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57};
+    if (!std::equal(singlePrefix.begin(), singlePrefix.end(), single) ||
+        !std::equal(familyPrefix.begin(), familyPrefix.end(), family)) {
+        Logger::Log(LogLevel::File, "[AP] Randomized-DLC grant hook signatures do not match this executable");
+        return false;
+    }
+    if (MH_CreateHook(single, &HookDlcMissingItemGrant,
+                      reinterpret_cast<void**>(&originalDlcMissingItemGrant)) != MH_OK) return false;
+    if (MH_CreateHook(family, &HookDlcMissingFamilyGrant,
+                      reinterpret_cast<void**>(&originalDlcMissingFamilyGrant)) != MH_OK) {
+        MH_RemoveHook(single);
+        return false;
+    }
+    if (MH_EnableHook(single) != MH_OK || MH_EnableHook(family) != MH_OK) {
+        MH_DisableHook(single);
+        MH_DisableHook(family);
+        MH_RemoveHook(single);
+        MH_RemoveHook(family);
+        return false;
+    }
+    Logger::Log(LogLevel::File, "[AP] Installed free and paid randomized-DLC missing-item grant suppression for story loads");
+    return true;
+}
+
 const std::unordered_map<std::string, const char*> knownVanillaShardIds = {
     // Generated from the unmodified base-game PB_DT_DropRateMaster in pakchunk0.
     // Runtime table access is insufficient because BloodstainedAP.pak has already
@@ -416,6 +478,11 @@ void HookManager::ApplyShardDropPolicy() {
 
 bool HookManager::Init() {
     MH_Initialize();
+
+    if (!InstallRandomizedDlcGrantHooks()) {
+        Logger::Log(LogLevel::File, "[AP] Failed to install randomized-DLC grant suppression");
+        return false;
+    }
 
     constexpr SDK::int32 ProcessLocalScriptFunction = 0x0674B520;
     void* processEventPtr = (void*)(SDK::InSDKUtils::GetImageBase() + SDK::Offsets::ProcessEvent);

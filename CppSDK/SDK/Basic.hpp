@@ -186,7 +186,8 @@ ClassType* GetDefaultObjImpl() {
 struct FUObjectItem final {
    public:
     class UObject* Object;  // 0x0000(0x0008)(NOT AUTO-GENERATED PROPERTY)
-    uint8 Pad_8[0x10];      // 0x0008(0x0010)(Fixing Struct Size After Last Property [ Dumper-7 ])
+    int32 InternalFlags;   // 0x0008(0x0004)(UE4.22 FUObjectItem flags, including GC RootSet)
+    uint8 Pad_C[0xC];       // 0x000C(0x000C)
 };
 DUMPER7_ASSERTS_FUObjectItem;
 
@@ -210,7 +211,7 @@ class TUObjectArray final {
 
     FUObjectItem** GetDecrytedObjPtr() const { return reinterpret_cast<FUObjectItem**>(DecryptPtr(Objects)); }
 
-    inline class UObject* GetByIndex(const int32 Index) const {
+    inline FUObjectItem* GetItemByIndex(const int32 Index) const {
         const int32 ChunkIndex = Index / ElementsPerChunk;
         const int32 InChunkIdx = Index % ElementsPerChunk;
 
@@ -219,7 +220,12 @@ class TUObjectArray final {
         FUObjectItem* ChunkPtr = GetDecrytedObjPtr()[ChunkIndex];
         if (!ChunkPtr) return nullptr;
 
-        return ChunkPtr[InChunkIdx].Object;
+        return &ChunkPtr[InChunkIdx];
+    }
+
+    inline class UObject* GetByIndex(const int32 Index) const {
+        const auto* Item = GetItemByIndex(Index);
+        return Item ? Item->Object : nullptr;
     }
 };
 DUMPER7_ASSERTS_TUObjectArray;

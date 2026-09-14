@@ -16,8 +16,8 @@ from pathlib import Path
 
 VERSION = "1.1.0"
 ROOT_NAME = f"BloodstainedAP-{VERSION}"
-EXPECTED_PAK_SHA256 = "ca0c8120287cbb81681bbcfc506729dfda9337a6b33ea08da2f034bcbe87843e"
-EXPECTED_PAK_FILES = 788
+EXPECTED_PAK_SHA256 = "a99933b03da0b93ced56facb8ef5f86758e4b08180453cad9fe66f9c33950dda"
+EXPECTED_PAK_FILES = 784
 FORBIDDEN_GENERATED_ASSETS = (
     "/difficultselecter.",
     "/entrynamesetter.",
